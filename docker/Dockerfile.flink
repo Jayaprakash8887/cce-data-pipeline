@@ -1,0 +1,17 @@
+FROM flink:1.19.1-java21
+
+# Add connector JARs to Flink lib
+RUN mkdir -p /opt/flink/plugins/kafka && \
+    mkdir -p /opt/flink/plugins/jdbc
+
+# Download Kafka connector
+ADD https://repo1.maven.org/maven2/org/apache/flink/flink-sql-connector-kafka/3.1.0-1.18/flink-sql-connector-kafka-3.1.0-1.18.jar /opt/flink/plugins/kafka/
+
+# Download JDBC connector
+ADD https://repo1.maven.org/maven2/org/apache/flink/flink-connector-jdbc/3.1.2-1.18/flink-connector-jdbc-3.1.2-1.18.jar /opt/flink/plugins/jdbc/
+
+# Download ClickHouse JDBC driver
+ADD https://repo1.maven.org/maven2/com/clickhouse/clickhouse-jdbc/0.6.0/clickhouse-jdbc-0.6.0-all.jar /opt/flink/lib/
+
+# Job JARs will be mounted or added in derived images
+WORKDIR /opt/flink

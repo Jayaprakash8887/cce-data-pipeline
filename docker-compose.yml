@@ -1,0 +1,218 @@
+# CCE Data Pipeline — Docker Compose (Local Development)
+# Usage: docker compose up -d
+
+services:
+  # ============================================================
+  # Analytics Store
+  # ============================================================
+  clickhouse:
+    image: clickhouse/clickhouse-server:24.8-alpine
+    container_name: cce-clickhouse
+    ports:
+      - "8123:8123"   # HTTP interface
+      - "9000:9000"   # Native protocol
+      - "9363:9363"   # Prometheus metrics
+    environment:
+      CLICKHOUSE_DB: cce_analytics
+      CLICKHOUSE_USER: cce_pipeline
+      CLICKHOUSE_PASSWORD: ${CLICKHOUSE_PASSWORD:-cce_analytics_dev}
+    volumes:
+      - clickhouse-data:/var/lib/clickhouse
+      - ./infra/clickhouse/config.xml:/etc/clickhouse-server/config.d/custom.xml:ro
+      - ./infra/clickhouse/users.xml:/etc/clickhouse-server/users.d/cce_pipeline.xml:ro
+      - ./schema:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD", "wget", "--spider", "-q", "http://localhost:8123/ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    deploy:
+      resources:
+        limits:
+          memory: 4g
+
+  # ============================================================
+  # Stream Processing (Flink)
+  # ============================================================
+  flink-jobmanager:
+    image: flink:1.19.1-java21
+    container_name: cce-flink-jobmanager
+    ports:
+      - "8081:8081"   # Flink Web UI
+    command: jobmanager
+    environment:
+      FLINK_PROPERTIES: |
+        jobmanager.rpc.address: flink-jobmanager
+        state.backend: rocksdb
+        state.checkpoints.dir: file:///opt/flink/checkpoints
+        execution.checkpointing.interval: 60000
+        execution.checkpointing.min-pause: 30000
+        restart-strategy: fixed-delay
+        restart-strategy.fixed-delay.attempts: 3
+        restart-strategy.fixed-delay.delay: 10s
+        metrics.reporter.prom.factory.class: org.apache.flink.metrics.prometheus.PrometheusReporterFactory
+        metrics.reporter.prom.port: 9249
+    volumes:
+      - flink-checkpoints:/opt/flink/checkpoints
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8081/overview"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+
+  flink-taskmanager:
+    image: flink:1.19.1-java21
+    container_name: cce-flink-taskmanager
+    depends_on:
+      flink-jobmanager:
+        condition: service_healthy
+    command: taskmanager
+    environment:
+      FLINK_PROPERTIES: |
+        jobmanager.rpc.address: flink-jobmanager
+        taskmanager.numberOfTaskSlots: 4
+        state.backend: rocksdb
+        state.checkpoints.dir: file:///opt/flink/checkpoints
+        execution.checkpointing.interval: 60000
+    volumes:
+      - flink-checkpoints:/opt/flink/checkpoints
+    deploy:
+      resources:
+        limits:
+          memory: 2g
+
+  # ============================================================
+  # CDC (Kafka Connect + Debezium)
+  # ============================================================
+  kafka-connect:
+    build:
+      context: ./docker
+      dockerfile: Dockerfile.kafka-connect
+    container_name: cce-kafka-connect
+    ports:
+      - "8083:8083"   # Connect REST API
+    environment:
+      CONNECT_BOOTSTRAP_SERVERS: ${KAFKA_BOOTSTRAP_SERVERS:-kafka:9092}
+      CONNECT_REST_PORT: 8083
+      CONNECT_GROUP_ID: cce-data-pipeline-connect
+      CONNECT_CONFIG_STORAGE_TOPIC: _cce-connect-configs
+      CONNECT_OFFSET_STORAGE_TOPIC: _cce-connect-offsets
+      CONNECT_STATUS_STORAGE_TOPIC: _cce-connect-status
+      CONNECT_CONFIG_STORAGE_REPLICATION_FACTOR: 1
+      CONNECT_OFFSET_STORAGE_REPLICATION_FACTOR: 1
+      CONNECT_STATUS_STORAGE_REPLICATION_FACTOR: 1
+      CONNECT_KEY_CONVERTER: org.apache.kafka.connect.json.JsonConverter
+      CONNECT_VALUE_CONVERTER: org.apache.kafka.connect.json.JsonConverter
+      CONNECT_KEY_CONVERTER_SCHEMAS_ENABLE: "false"
+      CONNECT_VALUE_CONVERTER_SCHEMAS_ENABLE: "false"
+      CONNECT_PLUGIN_PATH: /usr/share/confluent-hub-components
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8083/connectors"]
+      interval: 15s
+      timeout: 5s
+      retries: 10
+      start_period: 30s
+
+  # ============================================================
+  # Visualization (Superset)
+  # ============================================================
+  redis:
+    image: redis:7-alpine
+    container_name: cce-redis
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+  superset-db:
+    image: postgres:16-alpine
+    container_name: cce-superset-db
+    environment:
+      POSTGRES_DB: superset
+      POSTGRES_USER: superset
+      POSTGRES_PASSWORD: ${SUPERSET_DB_PASSWORD:-superset_dev}
+    volumes:
+      - superset-db-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U superset"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+  superset:
+    build:
+      context: ./docker
+      dockerfile: Dockerfile.superset
+    container_name: cce-superset
+    depends_on:
+      redis:
+        condition: service_healthy
+      superset-db:
+        condition: service_healthy
+      clickhouse:
+        condition: service_healthy
+    ports:
+      - "8088:8088"
+    environment:
+      SUPERSET_SECRET_KEY: ${SUPERSET_SECRET_KEY:-cce-data-pipeline-dev-secret-key-change-in-prod}
+      SUPERSET_LOAD_EXAMPLES: "no"
+      DATABASE_URI: postgresql+psycopg2://superset:${SUPERSET_DB_PASSWORD:-superset_dev}@superset-db:5432/superset
+      REDIS_URL: redis://redis:6379/0
+    volumes:
+      - ./infra/superset/superset_config.py:/app/pythonpath/superset_config.py:ro
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8088/health"]
+      interval: 15s
+      timeout: 5s
+      retries: 10
+      start_period: 60s
+
+  # ============================================================
+  # Monitoring
+  # ============================================================
+  prometheus:
+    image: prom/prometheus:v2.53.0
+    container_name: cce-prometheus
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./infra/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus-data:/prometheus
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.retention.time=7d
+    healthcheck:
+      test: ["CMD", "wget", "--spider", "-q", "http://localhost:9090/-/healthy"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  grafana:
+    image: grafana/grafana:11.0.0
+    container_name: cce-grafana
+    depends_on:
+      prometheus:
+        condition: service_healthy
+    ports:
+      - "3000:3000"
+    environment:
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_PASSWORD:-admin}
+      GF_INSTALL_PLUGINS: grafana-clickhouse-datasource
+    volumes:
+      - grafana-data:/var/lib/grafana
+      - ./infra/grafana/provisioning:/etc/grafana/provisioning:ro
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:3000/api/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+volumes:
+  clickhouse-data:
+  flink-checkpoints:
+  superset-db-data:
+  prometheus-data:
+  grafana-data:

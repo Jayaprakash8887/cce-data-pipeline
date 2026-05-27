@@ -1,0 +1,13 @@
+<clickhouse>
+    <users>
+        <cce_pipeline>
+            <password_sha256_hex/>
+            <networks>
+                <ip>::/0</ip>
+            </networks>
+            <profile>default</profile>
+            <quota>default</quota>
+            <access_management>0</access_management>
+        </cce_pipeline>
+    </users>
+</clickhouse>

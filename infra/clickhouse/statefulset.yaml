@@ -1,0 +1,137 @@
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: clickhouse
+  namespace: cce-data-pipeline
+  labels:
+    app: clickhouse
+spec:
+  serviceName: clickhouse
+  replicas: 1
+  selector:
+    matchLabels:
+      app: clickhouse
+  template:
+    metadata:
+      labels:
+        app: clickhouse
+    spec:
+      containers:
+      - name: clickhouse
+        image: clickhouse/clickhouse-server:24.8-alpine
+        ports:
+        - containerPort: 8123
+          name: http
+        - containerPort: 9000
+          name: native
+        - containerPort: 9363
+          name: metrics
+        env:
+        - name: CLICKHOUSE_DB
+          value: cce_analytics
+        - name: CLICKHOUSE_USER
+          value: cce_pipeline
+        - name: CLICKHOUSE_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: clickhouse-secrets
+              key: password
+        resources:
+          requests:
+            cpu: "4"
+            memory: "16Gi"
+          limits:
+            cpu: "8"
+            memory: "32Gi"
+        volumeMounts:
+        - name: data
+          mountPath: /var/lib/clickhouse
+        - name: config
+          mountPath: /etc/clickhouse-server/config.d/custom.xml
+          subPath: config.xml
+        livenessProbe:
+          httpGet:
+            path: /ping
+            port: 8123
+          initialDelaySeconds: 30
+          periodSeconds: 10
+        readinessProbe:
+          httpGet:
+            path: /ping
+            port: 8123
+          initialDelaySeconds: 10
+          periodSeconds: 5
+      volumes:
+      - name: config
+        configMap:
+          name: clickhouse-config
+  volumeClaimTemplates:
+  - metadata:
+      name: data
+    spec:
+      accessModes: ["ReadWriteOnce"]
+      storageClassName: ssd
+      resources:
+        requests:
+          storage: 500Gi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: clickhouse
+  namespace: cce-data-pipeline
+spec:
+  selector:
+    app: clickhouse
+  ports:
+  - port: 8123
+    targetPort: 8123
+    name: http
+  - port: 9000
+    targetPort: 9000
+    name: native
+  - port: 9363
+    targetPort: 9363
+    name: metrics
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: clickhouse-secrets
+  namespace: cce-data-pipeline
+type: Opaque
+stringData:
+  password: "CHANGE_ME_IN_PRODUCTION"
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: clickhouse-config
+  namespace: cce-data-pipeline
+data:
+  config.xml: |
+    <clickhouse>
+        <max_concurrent_queries>100</max_concurrent_queries>
+        <max_memory_usage>28000000000</max_memory_usage>
+        <max_bytes_before_external_group_by>10000000000</max_bytes_before_external_group_by>
+        <merge_tree>
+            <max_suspicious_broken_parts>5</max_suspicious_broken_parts>
+        </merge_tree>
+        <query_log>
+            <database>system</database>
+            <table>query_log</table>
+            <partition_by>toYYYYMM(event_date)</partition_by>
+            <flush_interval_milliseconds>7500</flush_interval_milliseconds>
+        </query_log>
+        <prometheus>
+            <endpoint>/metrics</endpoint>
+            <port>9363</port>
+            <metrics>true</metrics>
+            <events>true</events>
+            <asynchronous_metrics>true</asynchronous_metrics>
+        </prometheus>
+        <async_insert>1</async_insert>
+        <wait_for_async_insert>0</wait_for_async_insert>
+        <async_insert_max_data_size>10485760</async_insert_max_data_size>
+        <async_insert_busy_timeout_ms>5000</async_insert_busy_timeout_ms>
+    </clickhouse>

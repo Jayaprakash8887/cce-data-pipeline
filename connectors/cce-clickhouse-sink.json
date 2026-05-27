@@ -1,0 +1,27 @@
+{
+  "name": "cce-clickhouse-sink",
+  "config": {
+    "connector.class": "com.clickhouse.kafka.connect.ClickHouseSinkConnector",
+    "topics": "cce.cdc.public.protocol_definition,cce.cdc.public.protocol_instance,cce.cdc.public.step_instance,cce.cdc.public.deviation,cce.cdc.public.inbound_event,cce.cdc.public.intelligence_delivery,cce.cdc.public.intelligence_event_log,cce.cdc.public.action_definition,cce.cdc.public.receiver_adaptor,cce.cdc.public.destination_adaptor_mapping",
+    "clickhouse.topic2table.map": "cce.cdc.public.protocol_definition=protocol_definitions,cce.cdc.public.protocol_instance=protocol_instances,cce.cdc.public.step_instance=step_instances,cce.cdc.public.deviation=deviations,cce.cdc.public.inbound_event=inbound_events,cce.cdc.public.intelligence_delivery=intelligence_deliveries,cce.cdc.public.intelligence_event_log=intelligence_event_logs,cce.cdc.public.action_definition=action_definitions,cce.cdc.public.receiver_adaptor=receiver_adaptors,cce.cdc.public.destination_adaptor_mapping=destination_adaptor_mappings",
+    "hostname": "clickhouse",
+    "port": "8123",
+    "database": "cce_analytics",
+    "username": "cce_pipeline",
+    "password": "${file:/opt/kafka-connect/secrets/credentials.properties:clickhouse.password}",
+    "ssl": "false",
+    "exactlyOnce": "false",
+    "insert.format": "JSON",
+    "batch.size": "10000",
+    "flush.interval.ms": "5000",
+    "retry.count": "3",
+    "tableRefreshInterval": "60000",
+    "errors.tolerance": "all",
+    "errors.deadletterqueue.topic.name": "cce.clickhouse-sink.dlq",
+    "errors.deadletterqueue.context.headers.enable": "true",
+    "key.converter": "org.apache.kafka.connect.json.JsonConverter",
+    "key.converter.schemas.enable": "false",
+    "value.converter": "org.apache.kafka.connect.json.JsonConverter",
+    "value.converter.schemas.enable": "false"
+  }
+}
