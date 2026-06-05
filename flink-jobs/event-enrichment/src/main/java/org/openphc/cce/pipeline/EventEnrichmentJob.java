@@ -51,8 +51,8 @@ public class EventEnrichmentJob {
         enriched.addSink(JdbcSink.sink(
                 "INSERT INTO events_fact (event_id, source, event_type, patient_id, event_time, " +
                         "facility_id, correlation_id, content_type, resource_type, resource_status, " +
-                        "primary_code_system, primary_code, primary_code_display, practitioner_ref, raw_payload) " +
-                        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                        "primary_code_system, primary_code, primary_code_display, practitioner_ref, practitioner_display, raw_payload) " +
+                        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (ps, record) -> {
                     ps.setString(1, record.eventId);
                     ps.setString(2, record.source);
@@ -68,7 +68,8 @@ public class EventEnrichmentJob {
                     ps.setString(12, record.primaryCode);
                     ps.setString(13, record.primaryCodeDisplay);
                     ps.setString(14, record.practitionerRef);
-                    ps.setString(15, record.rawPayload);
+                    ps.setString(15, record.practitionerDisplay);
+                    ps.setString(16, record.rawPayload);
                 },
                 JdbcExecutionOptions.builder()
                         .withBatchSize(1000)
@@ -137,6 +138,7 @@ public class EventEnrichmentJob {
                     record.primaryCode = extractCodeField(data, "code");
                     record.primaryCodeDisplay = extractCodeField(data, "display");
                     record.practitionerRef = extractPractitioner(data);
+                    record.practitionerDisplay = extractPractitionerDisplay(data);
                 }
 
                 record.rawPayload = data != null ? data.toString() : "";
@@ -174,6 +176,23 @@ public class EventEnrichmentJob {
             // performer[0].actor.reference
             ref = textAtPath(data, "performer", 0, "actor", "reference");
             return ref;
+        }
+
+        /**
+         * Extract practitioner display name from FHIR paths (mirrors extractPractitioner paths).
+         */
+        static String extractPractitionerDisplay(JsonNode data) {
+            String display;
+            display = textAtPath(data, "participant", 0, "individual", "display");
+            if (display != null) return display;
+            display = textAtPath(data, "performer", 0, "display");
+            if (display != null) return display;
+            display = textAtPath(data, "asserter", "display");
+            if (display != null) return display;
+            display = textAtPath(data, "requester", "display");
+            if (display != null) return display;
+            display = textAtPath(data, "performer", 0, "actor", "display");
+            return display;
         }
 
         private static String textAtPath(JsonNode node, Object... path) {

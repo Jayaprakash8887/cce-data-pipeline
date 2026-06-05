@@ -21,5 +21,6 @@ public class EventRecord implements Serializable {
     public String primaryCode;
     public String primaryCodeDisplay;
     public String practitionerRef;
+    public String practitionerDisplay;
     public String rawPayload;
 }

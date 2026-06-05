@@ -26,6 +26,8 @@ CREATE TABLE IF NOT EXISTS events_fact (
     primary_code       String,
     primary_code_display String,
     practitioner_ref   Nullable(String),
+    practitioner_display Nullable(String),
+    processing_status  LowCardinality(String) DEFAULT 'UNMATCHED',
     processed_at       DateTime64(3) DEFAULT now64(3),
     raw_payload        String CODEC(ZSTD(3))
 )
@@ -40,12 +42,13 @@ CREATE TABLE IF NOT EXISTS event_volume_hourly (
     hour           DateTime,
     facility_id    LowCardinality(String),
     source         LowCardinality(String),
+    event_type     LowCardinality(String),
     resource_type  LowCardinality(String),
     event_count    UInt64
 )
 ENGINE = SummingMergeTree()
 PARTITION BY toYYYYMM(hour)
-ORDER BY (facility_id, source, resource_type, hour);
+ORDER BY (facility_id, source, event_type, resource_type, hour);
 
 -- Intelligence triggers from cce.intelligence.triggers Kafka topic
 CREATE TABLE IF NOT EXISTS intelligence_events (
@@ -93,8 +96,6 @@ CREATE TABLE IF NOT EXISTS protocol_instances (
     protocol_canonical      String,
     status                  LowCardinality(String),
     enrolled_at             DateTime64(3),
-    completed_at            Nullable(DateTime64(3)),
-    facility_id             LowCardinality(Nullable(String)),
     created_at              DateTime64(3),
     updated_at              DateTime64(3),
     _version                UInt64
@@ -116,7 +117,7 @@ CREATE TABLE IF NOT EXISTS step_instances (
     missed_date             Nullable(DateTime64(3)),
     completed_at            Nullable(DateTime64(3)),
     completed_by_source     Nullable(String),
-    matched_event_id        Nullable(UUID),
+    completed_by_event_id   Nullable(UUID),
     created_at              DateTime64(3),
     updated_at              DateTime64(3),
     _version                UInt64
@@ -124,39 +125,42 @@ CREATE TABLE IF NOT EXISTS step_instances (
 ENGINE = ReplacingMergeTree(_version)
 ORDER BY (id);
 
--- Compliance deviations
+-- Compliance deviations (OVERDUE, MISSED, ORDER_VIOLATION)
 CREATE TABLE IF NOT EXISTS deviations (
     id                      UUID,
     protocol_instance_id    UUID,
     step_instance_id        UUID,
-    patient_id              String,
-    facility_id             LowCardinality(Nullable(String)),
-    protocol_definition_id  UUID,
-    action_id               Nullable(String),
     deviation_type          LowCardinality(String),
     detected_at             DateTime64(3),
     intelligence_event_id   Nullable(UUID),
+    metadata                Nullable(String),
     _version                UInt64
 )
 ENGINE = ReplacingMergeTree(_version)
 PARTITION BY toYYYYMM(detected_at)
-ORDER BY (facility_id, deviation_type, detected_at, id);
+ORDER BY (deviation_type, detected_at, id);
 
--- Ingestion audit trail
-CREATE TABLE IF NOT EXISTS inbound_events (
+-- Ingestion audit trail (CDC from collector's inbound_event_log)
+-- All CloudEvents fields are in raw_payload JSONB; materialized columns extract key fields
+CREATE TABLE IF NOT EXISTS inbound_event_logs (
     id               UUID,
     cloudevents_id   String,
     source           LowCardinality(String),
-    event_type       LowCardinality(String),
-    subject          Nullable(String),
-    facility_id      LowCardinality(Nullable(String)),
     correlation_id   Nullable(String),
-    source_event_id  Nullable(String),
+    raw_payload      String CODEC(ZSTD(3)),
     status           LowCardinality(String),
     rejection_reason LowCardinality(Nullable(String)),
     error_details    Nullable(String),
     received_at      DateTime64(3),
-    _version         UInt64
+    _version         UInt64,
+    -- Materialized columns (auto-extracted from raw_payload at insert time)
+    subject          String MATERIALIZED JSONExtractString(raw_payload, 'subject'),
+    event_type       String MATERIALIZED JSONExtractString(raw_payload, 'type'),
+    facility_id      String MATERIALIZED JSONExtractString(raw_payload, 'facilityid'),
+    event_time       Nullable(DateTime64(3)) MATERIALIZED
+        toDateTime64OrNull(JSONExtractString(raw_payload, 'time'), 3),
+    resource_type    String MATERIALIZED
+        JSONExtractString(JSONExtractRaw(raw_payload, 'data'), 'resourceType')
 )
 ENGINE = ReplacingMergeTree(_version)
 PARTITION BY toYYYYMM(received_at)
@@ -193,6 +197,7 @@ TTL created_at + INTERVAL 1 YEAR;
 -- Intelligence trigger audit trail (from CDC)
 CREATE TABLE IF NOT EXISTS intelligence_event_logs (
     id                       UUID,
+    event_payload            String CODEC(ZSTD(3)),
     action_definition_id     UUID,
     protocol_instance_id     UUID,
     step_instance_id         Nullable(UUID),
@@ -200,12 +205,13 @@ CREATE TABLE IF NOT EXISTS intelligence_event_logs (
     subject                  String,
     action_type              LowCardinality(String),
     intelligence_destination LowCardinality(String),
-    step_state               LowCardinality(String),
+    step_state               LowCardinality(Nullable(String)),
     trigger_reason           LowCardinality(String),
     step_action_id           Nullable(String),
+    evaluation_expression    Nullable(String),
+    evaluation_context       Nullable(String),
     published                UInt8,
     published_at             Nullable(DateTime64(3)),
-    error_message            Nullable(String),
     created_at               DateTime64(3),
     _version                 UInt64
 )
@@ -213,7 +219,7 @@ ENGINE = ReplacingMergeTree(_version)
 PARTITION BY toYYYYMM(created_at)
 ORDER BY (action_type, intelligence_destination, created_at, id);
 
--- Intelligence action template definitions
+-- Intelligence action template definitions (ActivityDefinition resources)
 CREATE TABLE IF NOT EXISTS action_definitions (
     id            UUID,
     canonical_url String,
@@ -222,20 +228,25 @@ CREATE TABLE IF NOT EXISTS action_definitions (
     title         Nullable(String),
     status        LowCardinality(String),
     action_type   LowCardinality(String),
+    definition    String CODEC(ZSTD(3)),
+    created_at    DateTime64(3),
+    updated_at    DateTime64(3),
     _version      UInt64
 )
 ENGINE = ReplacingMergeTree(_version)
 ORDER BY (id);
 
--- Protocol metadata
+-- Protocol metadata (definition contains full FHIR R4 PlanDefinition JSON)
 CREATE TABLE IF NOT EXISTS protocol_definitions (
-    id        UUID,
-    name      String,
-    version   String,
-    url       String,
-    canonical String,
-    status    LowCardinality(String),
-    _version  UInt64
+    id         UUID,
+    name       String,
+    version    String,
+    url        String,
+    canonical  String,
+    status     LowCardinality(String),
+    definition String CODEC(ZSTD(3)),
+    loaded_at  Nullable(DateTime64(3)),
+    _version   UInt64
 )
 ENGINE = ReplacingMergeTree(_version)
 ORDER BY (id);
@@ -261,3 +272,19 @@ CREATE TABLE IF NOT EXISTS destination_adaptor_mappings (
 )
 ENGINE = ReplacingMergeTree(_version)
 ORDER BY (id);
+
+-- Compliance event log (CDC from compliance_event_log): lean idempotency + processing outcome
+-- Patient/facility/action details accessed via JOINs or from data JSONB
+CREATE TABLE IF NOT EXISTS compliance_event_logs (
+    id                 UUID,
+    cloudevents_id     String,
+    source             LowCardinality(String),
+    correlation_id     Nullable(String),
+    processing_status  LowCardinality(String),
+    data               Nullable(String) CODEC(ZSTD(3)),
+    received_at        DateTime64(3),
+    _version           UInt64
+)
+ENGINE = ReplacingMergeTree(_version)
+PARTITION BY toYYYYMM(received_at)
+ORDER BY (source, received_at, id);

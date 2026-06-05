@@ -79,10 +79,10 @@ check_eq_zero "events_fact: no NULL patient_id" \
     "SELECT count() FROM events_fact WHERE patient_id = ''"
 check_eq_zero "events_fact: no future event_time" \
     "SELECT count() FROM events_fact WHERE event_time > now() + INTERVAL 1 HOUR"
-check_eq_zero "intelligence_events: no NULL rule_id" \
-    "SELECT count() FROM intelligence_events WHERE rule_id = ''"
-check_eq_zero "step_transitions: no NULL instance_id" \
-    "SELECT count() FROM step_transitions WHERE instance_id = ''"
+check_eq_zero "step_instances: orphaned protocol_instance_id" \
+    "SELECT count() FROM step_instances FINAL WHERE protocol_instance_id NOT IN (SELECT id FROM protocol_instances FINAL)"
+check_eq_zero "deviations: orphaned step_instance_id" \
+    "SELECT count() FROM deviations FINAL WHERE step_instance_id NOT IN (SELECT id FROM step_instances FINAL)"
 
 echo ""
 echo "--- Freshness ---"
@@ -90,13 +90,13 @@ check "events_fact fresh (last 10min)" \
     "SELECT if(max(processed_at) >= now() - INTERVAL 10 MINUTE, 'ok', 'stale') FROM events_fact" \
     "ok"
 check "event_volume_hourly fresh (last 2h)" \
-    "SELECT if(max(window_start) >= now() - INTERVAL 2 HOUR, 'ok', 'stale') FROM event_volume_hourly" \
+    "SELECT if(max(hour) >= now() - INTERVAL 2 HOUR, 'ok', 'stale') FROM event_volume_hourly" \
     "ok"
 
 echo ""
 echo "--- Materialized View Consistency ---"
 check_eq_zero "MV daily vs hourly drift" \
-    "SELECT abs(a - b) FROM (SELECT sum(event_count) as a FROM mv_event_volume_daily WHERE event_date = today()) x, (SELECT sum(event_count) as b FROM event_volume_hourly WHERE toDate(window_start) = today()) y WHERE abs(a-b) > a * 0.01"
+    "SELECT abs(a - b) FROM (SELECT sum(event_count) as a FROM mv_event_volume_daily WHERE day = today()) x, (SELECT sum(event_count) as b FROM event_volume_hourly WHERE toDate(hour) = today()) y WHERE abs(a-b) > a * 0.01"
 
 echo ""
 echo "--- Duplicates ---"

@@ -2,8 +2,8 @@
   "name": "cce-clickhouse-sink",
   "config": {
     "connector.class": "com.clickhouse.kafka.connect.ClickHouseSinkConnector",
-    "topics": "cce.cdc.public.protocol_definition,cce.cdc.public.protocol_instance,cce.cdc.public.step_instance,cce.cdc.public.deviation,cce.cdc.public.inbound_event,cce.cdc.public.intelligence_delivery,cce.cdc.public.intelligence_event_log,cce.cdc.public.action_definition,cce.cdc.public.receiver_adaptor,cce.cdc.public.destination_adaptor_mapping",
-    "clickhouse.topic2table.map": "cce.cdc.public.protocol_definition=protocol_definitions,cce.cdc.public.protocol_instance=protocol_instances,cce.cdc.public.step_instance=step_instances,cce.cdc.public.deviation=deviations,cce.cdc.public.inbound_event=inbound_events,cce.cdc.public.intelligence_delivery=intelligence_deliveries,cce.cdc.public.intelligence_event_log=intelligence_event_logs,cce.cdc.public.action_definition=action_definitions,cce.cdc.public.receiver_adaptor=receiver_adaptors,cce.cdc.public.destination_adaptor_mapping=destination_adaptor_mappings",
+    "topics": "cce.cdc.public.protocol_definition,cce.cdc.public.protocol_instance,cce.cdc.public.step_instance,cce.cdc.public.deviation,cce.cdc.public.inbound_event_log,cce.cdc.public.intelligence_delivery,cce.cdc.public.intelligence_event_log,cce.cdc.public.action_definition,cce.cdc.public.receiver_adaptor,cce.cdc.public.destination_adaptor_mapping,cce.cdc.public.compliance_event_log",
+    "clickhouse.topic2table.map": "cce.cdc.public.protocol_definition=protocol_definitions,cce.cdc.public.protocol_instance=protocol_instances,cce.cdc.public.step_instance=step_instances,cce.cdc.public.deviation=deviations,cce.cdc.public.inbound_event_log=inbound_event_logs,cce.cdc.public.intelligence_delivery=intelligence_deliveries,cce.cdc.public.intelligence_event_log=intelligence_event_logs,cce.cdc.public.action_definition=action_definitions,cce.cdc.public.receiver_adaptor=receiver_adaptors,cce.cdc.public.destination_adaptor_mapping=destination_adaptor_mappings,cce.cdc.public.compliance_event_log=compliance_event_logs",
     "hostname": "clickhouse",
     "port": "8123",
     "database": "cce_analytics",

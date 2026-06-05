@@ -5,8 +5,8 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import org.apache.flink.api.common.eventtime.SerializableTimestampAssigner;
 import org.apache.flink.api.common.eventtime.WatermarkStrategy;
 import org.apache.flink.api.common.serialization.SimpleStringSchema;
-import org.apache.flink.api.java.tuple.Tuple4;
 import org.apache.flink.api.java.tuple.Tuple5;
+import org.apache.flink.api.java.tuple.Tuple6;
 import org.apache.flink.connector.jdbc.JdbcConnectionOptions;
 import org.apache.flink.connector.jdbc.JdbcExecutionOptions;
 import org.apache.flink.connector.jdbc.JdbcSink;
@@ -63,19 +63,20 @@ public class EventVolumeAggregatorJob {
         kafkaStream
                 .map(EventVolumeAggregatorJob::extractKey)
                 .filter(t -> t != null)
-                .keyBy(t -> t.f0 + "|" + t.f1 + "|" + t.f2)
+                .keyBy(t -> t.f0 + "|" + t.f1 + "|" + t.f2 + "|" + t.f3)
                 .window(TumblingEventTimeWindows.of(Time.hours(1)))
                 .allowedLateness(Time.minutes(5))
                 .apply(new CountWindowFunction())
                 .addSink(JdbcSink.sink(
-                        "INSERT INTO event_volume_hourly (hour, facility_id, source, resource_type, event_count) " +
-                                "VALUES (?, ?, ?, ?, ?)",
+                        "INSERT INTO event_volume_hourly (hour, facility_id, source, event_type, resource_type, event_count) " +
+                                "VALUES (?, ?, ?, ?, ?, ?)",
                         (ps, record) -> {
-                            ps.setTimestamp(1, new Timestamp(record.f3));
+                            ps.setTimestamp(1, new Timestamp(record.f4));
                             ps.setString(2, record.f0);
                             ps.setString(3, record.f1);
                             ps.setString(4, record.f2);
-                            ps.setLong(5, record.f4);
+                            ps.setString(5, record.f3);
+                            ps.setLong(6, record.f5);
                         },
                         JdbcExecutionOptions.builder()
                                 .withBatchSize(500)
@@ -92,46 +93,48 @@ public class EventVolumeAggregatorJob {
     }
 
     /**
-     * Extracts (facility_id, source, resource_type, eventTimeMs) from CloudEvent JSON.
+     * Extracts (facility_id, source, event_type, resource_type, eventTimeMs) from CloudEvent JSON.
      */
-    static Tuple4<String, String, String, Long> extractKey(String json) {
+    static Tuple5<String, String, String, String, Long> extractKey(String json) {
         try {
             JsonNode root = MAPPER.readTree(json);
             String facilityId = root.has("facilityid") ? root.get("facilityid").asText() : "unknown";
             String source = root.has("source") ? root.get("source").asText() : "unknown";
+            String eventType = root.has("type") ? root.get("type").asText() : "unknown";
             String resourceType = "unknown";
             JsonNode data = root.get("data");
             if (data != null && data.has("resourceType")) {
                 resourceType = data.get("resourceType").asText();
             }
             long eventTime = root.has("time") ? Instant.parse(root.get("time").asText()).toEpochMilli() : System.currentTimeMillis();
-            return Tuple4.of(facilityId, source, resourceType, eventTime);
+            return Tuple5.of(facilityId, source, eventType, resourceType, eventTime);
         } catch (Exception e) {
             return null;
         }
     }
 
     /**
-     * Window function that counts events and emits (facility_id, source, resource_type, window_start_ms, count).
+     * Window function that counts events and emits (facility_id, source, event_type, resource_type, window_start_ms, count).
      */
     private static class CountWindowFunction implements WindowFunction<
-            Tuple4<String, String, String, Long>,
-            Tuple5<String, String, String, Long, Long>,
+            Tuple5<String, String, String, String, Long>,
+            Tuple6<String, String, String, String, Long, Long>,
             String, TimeWindow> {
 
         @Override
         public void apply(String key, TimeWindow window,
-                          Iterable<Tuple4<String, String, String, Long>> input,
-                          Collector<Tuple5<String, String, String, Long, Long>> out) {
+                          Iterable<Tuple5<String, String, String, String, Long>> input,
+                          Collector<Tuple6<String, String, String, String, Long, Long>> out) {
             long count = 0;
-            String facilityId = null, source = null, resourceType = null;
+            String facilityId = null, source = null, eventType = null, resourceType = null;
             for (var t : input) {
                 facilityId = t.f0;
                 source = t.f1;
-                resourceType = t.f2;
+                eventType = t.f2;
+                resourceType = t.f3;
                 count++;
             }
-            out.collect(Tuple5.of(facilityId, source, resourceType, window.getStart(), count));
+            out.collect(Tuple6.of(facilityId, source, eventType, resourceType, window.getStart(), count));
         }
     }
 }
