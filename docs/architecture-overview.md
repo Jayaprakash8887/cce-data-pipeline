@@ -210,25 +210,7 @@ flowchart LR
 
 ---
 
-## 8. Comparison: Previous vs. New Architecture
-
-| Aspect | Previous (insights-service + UI) | New (Data Pipeline) |
-|--------|----------------------------------|---------------------|
-| **Custom code** | ~77 Java files, 12 packages, full Spring Boot app | Zero custom application code |
-| **Query layer** | Custom JPA repositories, hand-tuned SQL | ClickHouse materialized views + Superset SQL |
-| **Caching** | Custom 3-tier Caffeine cache | ClickHouse native query cache + materialized views |
-| **Dashboard** | Custom React application | Apache Superset (no-code dashboard builder) |
-| **Stream processing** | N/A | None needed — ClickHouse MATERIALIZED columns + MVs |
-| **Deployment** | 2 additional microservices (JVM) | Infrastructure components only (ClickHouse, Kafka Connect, Superset) |
-| **Maintenance** | Application code maintenance, dependency upgrades | Infrastructure operations only |
-| **Data consistency** | Direct DB queries (consistent) | CDC from committed data only (consistent) |
-| **Flexibility** | Developer-dependent for new metrics | Self-service (operations team builds dashboards) |
-| **Latency** | Real-time (direct DB query + 15-60min cache) | Near-real-time (< 60s DB commit-to-dashboard) |
-| **Scale ceiling** | PostgreSQL query load on operational DB | Dedicated OLAP engine; no operational DB impact |
-
----
-
-## 9. Security
+## 8. Security
 
 | Concern | Mechanism |
 |---------|-----------|
@@ -242,7 +224,7 @@ flowchart LR
 
 ---
 
-## 10. Failure Modes & Recovery
+## 9. Failure Modes & Recovery
 
 | Failure | Impact | Recovery |
 |---------|--------|----------|
@@ -256,7 +238,7 @@ flowchart LR
 
 ---
 
-## 11. Migration Strategy
+## 10. Migration Strategy
 
 | Phase | Duration | Activities |
 |-------|----------|------------|
@@ -270,7 +252,7 @@ flowchart LR
 
 ---
 
-## 12. Schema Evolution Strategy
+## 11. Schema Evolution Strategy
 
 The pipeline is designed for forward-compatible evolution without downtime:
 
@@ -284,15 +266,3 @@ The pipeline is designed for forward-compatible evolution without downtime:
 
 **Key invariant:** The `raw_payload` column in `inbound_event_logs` stores the full CloudEvent (including FHIR resource) as-is. Any new field extraction is a non-breaking addition — historical data can always be backfilled from `raw_payload` using ClickHouse's JSON functions.
 
----
-
-## 13. Future Enhancements
-
-| Enhancement | Trigger | Approach |
-|-------------|---------|----------|
-| **Predictive analytics** | Clinical program request | Python/ML models reading from ClickHouse via external service |
-| **Alerting** | Operational need | Superset alerts or Grafana alerting rules on ClickHouse metrics |
-| **Multi-cluster** | Geographic expansion | ClickHouse distributed tables across regions |
-| **Data lake** | Long-term archival | ClickHouse S3 table function for cold storage in Parquet |
-| **API layer** | External integrations need programmatic access | Lightweight read-only API over ClickHouse (e.g., Cube.js or custom thin service) |
-| **Additional MATERIALIZED columns** | New analytics dimension needed | `ALTER TABLE ADD COLUMN ... MATERIALIZED JSONExtract(...)` — no pipeline changes |
