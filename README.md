@@ -39,58 +39,24 @@ until curl -sf http://localhost:8083/connectors; do sleep 5; done
 
 ## CDC Tables
 
-All data flows via Change Data Capture from committed PostgreSQL records (shared `ccedb` database):
+All data flows via Change Data Capture from committed PostgreSQL records (shared `ccedb` database). **11 tables** captured from 3 services (Collector, Compliance, Intelligence) → ClickHouse `cce_analytics` database.
 
-| Table Owner | Source Table | ClickHouse Table |
-|-------------|--------------|------------------|
-| Collector Service | `inbound_event_log` | `inbound_event_logs` |
-| Compliance Service | `protocol_definition` | `protocol_definitions` |
-| Compliance Service | `protocol_instance` | `protocol_instances` |
-| Compliance Service | `step_instance` | `step_instances` |
-| Compliance Service | `deviation` | `deviations` |
-| Compliance Service | `intelligence_event_log` | `intelligence_event_logs` |
-| Compliance Service | `action_definition` | `action_definitions` |
-| Compliance Service | `compliance_event_log` | `compliance_event_logs` |
-| Intelligence Service | `intelligence_delivery` | `intelligence_deliveries` |
-| Intelligence Service | `receiver_adaptor` | `receiver_adaptors` |
-| Intelligence Service | `destination_adaptor_mapping` | `destination_adaptor_mappings` |
+For full table listing, CDC topics, and schema details, see [Data Flow & Schema Design](docs/data-flow.md).
 
 ## Materialized Views
 
-Pre-aggregated analytics computed at insert time:
+**19 pre-aggregated views** computed at insert time, covering event volume, compliance, deviations, intelligence, delivery, and step states — with full Entity × Behavior cross-dimensional coverage (patient, facility, practitioner, protocol dimensions).
 
-| View | Source Table | Purpose |
-|------|-------------|---------|
-| `mv_event_volume_hourly` | `inbound_event_logs` | Event counts by facility/source/type |
-| `mv_event_volume_daily` | `inbound_event_logs` | Daily rollup |
-| `mv_facility_summary` | `inbound_event_logs` | Facility-level metrics |
-| `mv_practitioner_summary` | `inbound_event_logs` | Practitioner activity |
-| `mv_compliance_summary` | `protocol_instances` | Protocol compliance rates |
-| `mv_deviation_trends` | `deviations` | Daily deviation counts |
-| `mv_deviation_by_protocol` | `deviations` | Deviations per protocol |
-| `mv_ingestion_quality` | `inbound_event_logs` | Source quality metrics |
-| `mv_intelligence_summary` | `intelligence_event_logs` | Intelligence trigger aggregation |
-| `mv_delivery_performance_hourly` | `intelligence_deliveries` | Delivery latency & success |
-| `mv_step_states_daily` | `step_instances` | Step state distribution |
-| `mv_compliance_by_patient` | `protocol_instances` | Patient-level compliance |
-| `mv_deviation_by_patient` | `deviations` JOIN `protocol_instances` | Deviations per patient |
-| `mv_intelligence_by_patient` | `intelligence_event_logs` | Intelligence triggers per patient |
-| `mv_delivery_by_patient` | `intelligence_deliveries` | Delivery outcomes per patient |
-| `mv_step_states_by_protocol` | `step_instances` | Step states per protocol |
-| `mv_step_states_by_patient` | `step_instances` JOIN `protocol_instances` | Step states per patient |
-| `mv_intelligence_by_protocol` | `intelligence_event_logs` | Intelligence triggers per protocol |
-| `mv_delivery_by_protocol` | `intelligence_deliveries` | Delivery outcomes per protocol |
+For the complete MV catalog and coverage matrix, see [Data Flow & Schema Design § 4](docs/data-flow.md).
 
 ## Documentation
 
 | Document | Purpose |
 |----------|---------|
-| [Architecture Overview](docs/architecture-overview.md) | System context, principles, data domains |
-| [Technology Stack](docs/technology-stack.md) | Technology choices with justification |
-| [Data Flow & Schema](docs/data-flow.md) | CDC pipelines, ClickHouse DDL, query patterns |
+| [Architecture Overview](docs/architecture-overview.md) | System context, principles, technology decisions, capacity planning, security |
+| [Data Flow & Schema](docs/data-flow.md) | CDC pipelines, ClickHouse DDL, MV catalog, query patterns |
 | [Dashboard Design](docs/dashboard-design.md) | 11 dashboard wireframes with SQL |
-| [Deployment Guide](docs/deployment-guide.md) | K8s manifests, Docker Compose, setup |
-| [Deployment Runbook](docs/deployment-runbook.md) | Step-by-step production deployment |
+| [Deployment Guide](docs/deployment-guide.md) | Full lifecycle: setup, deploy, validate, operate, troubleshoot |
 
 ## Key Design Decisions
 
