@@ -1,20 +1,6 @@
 # CCE Data Pipeline — Architecture Overview
 
-## 1. Purpose
-
-The **CCE Data Pipeline** replaces the custom `cce-insights-service` and `cce-insights-ui` with an open-source analytics stack. It captures committed data from CCE PostgreSQL via Change Data Capture (CDC), materializes analytics views in a columnar OLAP database, and exposes interactive dashboards via open-source visualization tools.
-
-**Design goals:**
-- Eliminate custom analytics code — leverage battle-tested open-source components
-- Handle **600k+ events/day** (≈7 events/second average, burst peaks up to 50 eps)
-- Provide near-real-time insights (< 60-second latency from DB commit to dashboard)
-- Analytics based exclusively on **committed data** — no in-flight Kafka consumption that could reflect rejected/failed events
-- Enable self-service exploration by operations teams without engineering involvement
-- Maintain separation of concerns — the pipeline is read-only and never writes back to CCE operational databases
-
----
-
-## 2. System Context
+## 1. System Context
 
 ```mermaid
 graph TB
@@ -64,7 +50,7 @@ graph TB
 
 ---
 
-## 3. Architecture Principles
+## 2. Architecture Principles
 
 | # | Principle | Rationale |
 |---|-----------|-----------|
@@ -78,9 +64,9 @@ graph TB
 
 ---
 
-## 4. Technology Stack
+## 3. Technology Stack
 
-### 4.1 Component Summary
+### 3.1 Component Summary
 
 | Layer | Technology | Version | License | Purpose |
 |-------|-----------|---------|---------|---------|
@@ -95,7 +81,7 @@ graph TB
 
 > **No stream processing layer.** ClickHouse MATERIALIZED columns handle field extraction at insert time. Materialized Views pre-aggregate. Zero custom application code.
 
-### 4.2 Version Compatibility Matrix
+### 3.2 Version Compatibility Matrix
 
 | Component | Minimum Version | Tested Version | Notes |
 |-----------|----------------|----------------|-------|
@@ -109,7 +95,7 @@ graph TB
 | Redis | 6.0 | 7.x | Superset cache |
 | Prometheus | 2.45 | 2.53 | Metrics collection |
 
-### 4.3 Technology Decisions
+### 3.3 Technology Decisions
 
 #### Why ClickHouse?
 
@@ -132,15 +118,15 @@ graph TB
 
 ---
 
-## 5. Component Architecture
+## 4. Component Architecture
 
-### 5.1 CDC Layer (Debezium + ClickHouse Kafka Connect Sink)
+### 4.1 CDC Layer (Debezium + ClickHouse Kafka Connect Sink)
 
 **Debezium 2.6.1** captures PostgreSQL WAL changes and publishes them to Kafka topics. **ClickHouse Kafka Connect Sink 0.14.0** consumes those topics and writes directly to ClickHouse tables using `ReplacingMergeTree` for idempotent upserts.
 
 All 11 CDC tables reside in the shared `ccedb` PostgreSQL database. One Debezium source connector captures all tables. For the full table listing, CDC topics, and schema details, see [Data Flow & Schema Design](data-flow.md).
 
-### 5.2 Analytics Storage Layer (ClickHouse)
+### 4.2 Analytics Storage Layer (ClickHouse)
 
 **Key features leveraged:**
 - **ReplacingMergeTree** — CDC-compatible engine with `_version` for idempotent upserts
@@ -155,7 +141,7 @@ All 11 CDC tables reside in the shared `ccedb` PostgreSQL database. One Debezium
 
 For full schema DDL, MV catalog, Entity × Behavior coverage matrix, and query patterns, see [Data Flow & Schema Design](data-flow.md).
 
-### 5.3 Visualization Layer (Superset)
+### 4.3 Visualization Layer (Superset)
 
 - **ClickHouse connector** — native SQLAlchemy driver (`clickhouse-connect`)
 - **Row-level security** — facility-based access control
@@ -166,7 +152,7 @@ For full schema DDL, MV catalog, Entity × Behavior coverage matrix, and query p
 
 For dashboard wireframes and SQL queries, see [Dashboard Design](dashboard-design.md).
 
-### 5.4 Operational Monitoring (Grafana + Prometheus)
+### 4.4 Operational Monitoring (Grafana + Prometheus)
 
 **Grafana** monitors the health of the data pipeline itself (not clinical analytics):
 - CDC sink connector health (throughput, errors, lag)
@@ -178,7 +164,7 @@ For dashboard wireframes and SQL queries, see [Dashboard Design](dashboard-desig
 
 ---
 
-## 6. Integration Points
+## 5. Integration Points
 
 ```mermaid
 flowchart TD
@@ -207,7 +193,7 @@ flowchart TD
 
 ---
 
-## 7. Data Domains
+## 6. Data Domains
 
 | Domain | Key Metrics | Source → MV |
 |--------|-------------|-------------|
@@ -224,9 +210,9 @@ flowchart TD
 
 ---
 
-## 8. Capacity Planning
+## 7. Capacity Planning
 
-### 8.1 Event Volume Estimates
+### 7.1 Event Volume Estimates
 
 | Metric | Value | Notes |
 |--------|-------|-------|
@@ -240,7 +226,7 @@ flowchart TD
 | Retention period | 2 years | Configurable |
 | Total storage (2yr) | ~86 GB compressed | Well within single-node capacity |
 
-### 8.2 Query Performance Targets
+### 7.2 Query Performance Targets
 
 | Query Type | Target Latency | Example |
 |------------|---------------|---------|
@@ -249,7 +235,7 @@ flowchart TD
 | Full-scan analytics | < 10s | Year-over-year comparisons |
 | Export (CSV) | < 30s | Full compliance report |
 
-### 8.3 Resource Requirements
+### 7.3 Resource Requirements
 
 #### Development / Staging
 
@@ -280,7 +266,7 @@ flowchart TD
 
 ---
 
-## 9. Security
+## 8. Security
 
 | Concern | Mechanism |
 |---------|-----------|
@@ -294,7 +280,7 @@ flowchart TD
 
 ---
 
-## 10. Failure Modes & Recovery
+## 9. Failure Modes & Recovery
 
 | Failure | Impact | Recovery |
 |---------|--------|----------|
@@ -322,7 +308,7 @@ flowchart TD
 
 ---
 
-## 11. Migration Strategy
+## 10. Migration Strategy
 
 | Phase | Duration | Activities |
 |-------|----------|------------|
@@ -336,7 +322,7 @@ flowchart TD
 
 ---
 
-## 12. Schema Evolution Strategy
+## 11. Schema Evolution Strategy
 
 The pipeline is designed for forward-compatible evolution without downtime:
 
