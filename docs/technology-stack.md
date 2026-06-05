@@ -37,21 +37,21 @@
 | `cce-cdc-source` | Source | `io.debezium.connector.postgresql.PostgresConnector` |
 | `cce-clickhouse-sink` | Sink | `com.clickhouse.kafka.connect.ClickHouseSinkConnector` |
 
-**Source tables captured (11 total):**
+**Source tables captured (11 total from shared `ccedb` database):**
 
-| Source Table | Source DB | CDC Topic |
-|--------------|-----------|-----------|
-| `inbound_event_log` | cce-collector-service | `cce.cdc.collector_service.public.inbound_event_log` |
-| `protocol_definition` | cce-compliance-service | `cce.cdc.compliance_service.public.protocol_definition` |
-| `protocol_instance` | cce-compliance-service | `cce.cdc.compliance_service.public.protocol_instance` |
-| `step_instance` | cce-compliance-service | `cce.cdc.compliance_service.public.step_instance` |
-| `deviation` | cce-compliance-service | `cce.cdc.compliance_service.public.deviation` |
-| `intelligence_event_log` | cce-compliance-service | `cce.cdc.compliance_service.public.intelligence_event_log` |
-| `intelligence_delivery` | cce-compliance-service | `cce.cdc.compliance_service.public.intelligence_delivery` |
-| `action_definition` | cce-compliance-service | `cce.cdc.compliance_service.public.action_definition` |
-| `compliance_event_log` | cce-compliance-service | `cce.cdc.compliance_service.public.compliance_event_log` |
-| `receiver_adaptor` | cce-collector-service | `cce.cdc.collector_service.public.receiver_adaptor` |
-| `destination_adaptor_mapping` | cce-collector-service | `cce.cdc.collector_service.public.destination_adaptor_mapping` |
+| Table Owner | Source Table | CDC Topic |
+|-------------|--------------|-----------|
+| Collector Service | `inbound_event_log` | `cce.cdc.public.inbound_event_log` |
+| Compliance Service | `protocol_definition` | `cce.cdc.public.protocol_definition` |
+| Compliance Service | `protocol_instance` | `cce.cdc.public.protocol_instance` |
+| Compliance Service | `step_instance` | `cce.cdc.public.step_instance` |
+| Compliance Service | `deviation` | `cce.cdc.public.deviation` |
+| Compliance Service | `intelligence_event_log` | `cce.cdc.public.intelligence_event_log` |
+| Compliance Service | `action_definition` | `cce.cdc.public.action_definition` |
+| Compliance Service | `compliance_event_log` | `cce.cdc.public.compliance_event_log` |
+| Intelligence Service | `intelligence_delivery` | `cce.cdc.public.intelligence_delivery` |
+| Intelligence Service | `receiver_adaptor` | `cce.cdc.public.receiver_adaptor` |
+| Intelligence Service | `destination_adaptor_mapping` | `cce.cdc.public.destination_adaptor_mapping` |
 
 **Configuration highlights:**
 ```properties

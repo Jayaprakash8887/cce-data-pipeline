@@ -7,7 +7,6 @@
     "database.user": "cce_cdc_user",
     "database.password": "${file:/opt/kafka-connect/secrets/credentials.properties:pg.password}",
     "database.dbname": "ccedb",
-    "database.server.name": "cce",
     "topic.prefix": "cce.cdc",
     "schema.include.list": "public",
     "table.include.list": "public.protocol_definition,public.protocol_instance,public.step_instance,public.deviation,public.inbound_event_log,public.intelligence_delivery,public.intelligence_event_log,public.action_definition,public.receiver_adaptor,public.destination_adaptor_mapping,public.compliance_event_log",

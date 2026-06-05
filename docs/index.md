@@ -29,21 +29,21 @@ The CCE Data Pipeline replaces the custom `cce-insights-service` and `cce-insigh
 PostgreSQL (WAL) → Debezium Source Connector → Kafka (CDC topics) → ClickHouse Sink Connector → ClickHouse Tables
 ```
 
-### CDC Tables (PostgreSQL → ClickHouse)
+### CDC Tables (PostgreSQL `ccedb` → ClickHouse)
 
-| Source Table | ClickHouse Table | Source DB |
-|--------------|------------------|-----------|
-| `inbound_event_log` | `inbound_event_logs` | collector-service |
-| `protocol_definition` | `protocol_definitions` | compliance-service |
-| `protocol_instance` | `protocol_instances` | compliance-service |
-| `step_instance` | `step_instances` | compliance-service |
-| `deviation` | `deviations` | compliance-service |
-| `intelligence_event_log` | `intelligence_event_logs` | compliance-service |
-| `intelligence_delivery` | `intelligence_deliveries` | compliance-service |
-| `action_definition` | `action_definitions` | compliance-service |
-| `compliance_event_log` | `compliance_event_logs` | compliance-service |
-| `receiver_adaptor` | `receiver_adaptors` | collector-service |
-| `destination_adaptor_mapping` | `destination_adaptor_mappings` | collector-service |
+| Table Owner | Source Table | ClickHouse Table |
+|-------------|--------------|------------------|
+| Collector Service | `inbound_event_log` | `inbound_event_logs` |
+| Compliance Service | `protocol_definition` | `protocol_definitions` |
+| Compliance Service | `protocol_instance` | `protocol_instances` |
+| Compliance Service | `step_instance` | `step_instances` |
+| Compliance Service | `deviation` | `deviations` |
+| Compliance Service | `intelligence_event_log` | `intelligence_event_logs` |
+| Compliance Service | `action_definition` | `action_definitions` |
+| Compliance Service | `compliance_event_log` | `compliance_event_logs` |
+| Intelligence Service | `intelligence_delivery` | `intelligence_deliveries` |
+| Intelligence Service | `receiver_adaptor` | `receiver_adaptors` |
+| Intelligence Service | `destination_adaptor_mapping` | `destination_adaptor_mappings` |
 
 ### Key Infrastructure
 

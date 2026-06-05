@@ -39,21 +39,21 @@ until curl -sf http://localhost:8083/connectors; do sleep 5; done
 
 ## CDC Tables
 
-All data flows via Change Data Capture from committed PostgreSQL records:
+All data flows via Change Data Capture from committed PostgreSQL records (shared `ccedb` database):
 
-| Source Table | ClickHouse Table | Source DB |
-|--------------|------------------|-----------|
-| `inbound_event_log` | `inbound_event_logs` | collector-service |
-| `protocol_definition` | `protocol_definitions` | compliance-service |
-| `protocol_instance` | `protocol_instances` | compliance-service |
-| `step_instance` | `step_instances` | compliance-service |
-| `deviation` | `deviations` | compliance-service |
-| `intelligence_event_log` | `intelligence_event_logs` | compliance-service |
-| `intelligence_delivery` | `intelligence_deliveries` | compliance-service |
-| `action_definition` | `action_definitions` | compliance-service |
-| `compliance_event_log` | `compliance_event_logs` | compliance-service |
-| `receiver_adaptor` | `receiver_adaptors` | collector-service |
-| `destination_adaptor_mapping` | `destination_adaptor_mappings` | collector-service |
+| Table Owner | Source Table | ClickHouse Table |
+|-------------|--------------|------------------|
+| Collector Service | `inbound_event_log` | `inbound_event_logs` |
+| Compliance Service | `protocol_definition` | `protocol_definitions` |
+| Compliance Service | `protocol_instance` | `protocol_instances` |
+| Compliance Service | `step_instance` | `step_instances` |
+| Compliance Service | `deviation` | `deviations` |
+| Compliance Service | `intelligence_event_log` | `intelligence_event_logs` |
+| Compliance Service | `action_definition` | `action_definitions` |
+| Compliance Service | `compliance_event_log` | `compliance_event_logs` |
+| Intelligence Service | `intelligence_delivery` | `intelligence_deliveries` |
+| Intelligence Service | `receiver_adaptor` | `receiver_adaptors` |
+| Intelligence Service | `destination_adaptor_mapping` | `destination_adaptor_mappings` |
 
 ## Materialized Views
 
@@ -72,6 +72,11 @@ Pre-aggregated analytics computed at insert time:
 | `mv_intelligence_summary` | `intelligence_event_logs` | Intelligence trigger aggregation |
 | `mv_delivery_performance_hourly` | `intelligence_deliveries` | Delivery latency & success |
 | `mv_step_states_daily` | `step_instances` | Step state distribution |
+| `mv_compliance_by_patient` | `protocol_instances` | Patient-level compliance |
+| `mv_deviation_by_patient` | `deviations` JOIN `protocol_instances` | Deviations per patient |
+| `mv_intelligence_by_patient` | `intelligence_event_logs` | Intelligence triggers per patient |
+| `mv_delivery_by_patient` | `intelligence_deliveries` | Delivery outcomes per patient |
+| `mv_step_states_by_protocol` | `step_instances` | Step states per protocol |
 
 ## Documentation
 

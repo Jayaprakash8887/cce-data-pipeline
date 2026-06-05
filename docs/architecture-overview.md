@@ -21,8 +21,9 @@ graph TB
     subgraph Existing["CCE Platform (Existing)"]
         COLLECTOR["CCE Collector Service"]
         COMPLIANCE["CCE Compliance Service"]
-        PG_COLLECTOR["PostgreSQL<br/>(collector DB)"]
-        PG_COMPLIANCE["PostgreSQL<br/>(compliance DB)"]
+        SCHEDULER["CCE Scheduler Service"]
+        INTELLIGENCE["CCE Intelligence Service"]
+        PG["PostgreSQL 16<br/>(ccedb — shared)"]
     end
 
     subgraph Pipeline["CCE Data Pipeline"]
@@ -37,11 +38,12 @@ graph TB
         ADMIN["System Administrators"]
     end
 
-    COLLECTOR --> PG_COLLECTOR
-    COMPLIANCE --> PG_COMPLIANCE
+    COLLECTOR --> PG
+    COMPLIANCE --> PG
+    SCHEDULER --> PG
+    INTELLIGENCE --> PG
 
-    PG_COLLECTOR -->|"CDC (WAL)"| DEBEZIUM
-    PG_COMPLIANCE -->|"CDC (WAL)"| DEBEZIUM
+    PG -->|"CDC (WAL)"| DEBEZIUM
     DEBEZIUM -->|"Kafka → ClickHouse Sink"| CLICKHOUSE
     CLICKHOUSE --> SUPERSET
 
@@ -53,7 +55,7 @@ graph TB
     classDef pipeline fill:#4A90D9,stroke:#2C5F8A,color:white
     classDef users fill:#27AE60,stroke:#1E8449,color:white
 
-    class COLLECTOR,COMPLIANCE,PG_COLLECTOR,PG_COMPLIANCE existing
+    class COLLECTOR,COMPLIANCE,SCHEDULER,INTELLIGENCE,PG existing
     class DEBEZIUM,CLICKHOUSE,SUPERSET pipeline
     class OPS,CLINICAL,ADMIN users
 ```
@@ -82,19 +84,21 @@ graph TB
 
 **Debezium 2.6.1** captures PostgreSQL WAL changes and publishes them to Kafka topics. **ClickHouse Kafka Connect Sink 0.14.0** consumes those topics and writes directly to ClickHouse tables using `ReplacingMergeTree` for idempotent upserts.
 
-| Source Database | Source Table | ClickHouse Table | Purpose |
-|-----------------|--------------|------------------|---------|
-| cce-collector-service | `inbound_event_log` | `inbound_event_logs` | Full CloudEvent audit trail (raw_payload contains FHIR) |
-| cce-compliance-service | `protocol_definition` | `protocol_definitions` | Protocol metadata (FHIR PlanDefinition) |
-| cce-compliance-service | `protocol_instance` | `protocol_instances` | Patient enrollments, compliance status |
-| cce-compliance-service | `step_instance` | `step_instances` | Step states, due dates, completion |
-| cce-compliance-service | `deviation` | `deviations` | OVERDUE, MISSED, ORDER_VIOLATION records |
-| cce-compliance-service | `intelligence_event_log` | `intelligence_event_logs` | Intelligence trigger audit trail |
-| cce-compliance-service | `action_definition` | `action_definitions` | Notification/escalation action templates |
-| cce-compliance-service | `compliance_event_log` | `compliance_event_logs` | Compliance processing outcomes |
-| cce-collector-service | `receiver_adaptor` | `receiver_adaptors` | FHIR endpoint adaptor registry |
-| cce-collector-service | `destination_adaptor_mapping` | `destination_adaptor_mappings` | Destination-to-adaptor routing |
-| cce-compliance-service | `intelligence_delivery` | `intelligence_deliveries` | Intelligence action delivery outcomes |
+| Table Owner | Source Table | ClickHouse Table | Purpose |
+|-------------|--------------|------------------|---------|
+| Collector Service | `inbound_event_log` | `inbound_event_logs` | Full CloudEvent audit trail (raw_payload contains FHIR) |
+| Compliance Service | `protocol_definition` | `protocol_definitions` | Protocol metadata (FHIR PlanDefinition) |
+| Compliance Service | `protocol_instance` | `protocol_instances` | Patient enrollments, compliance status |
+| Compliance Service | `step_instance` | `step_instances` | Step states, due dates, completion |
+| Compliance Service | `deviation` | `deviations` | OVERDUE, MISSED, ORDER_VIOLATION records |
+| Compliance Service | `intelligence_event_log` | `intelligence_event_logs` | Intelligence trigger audit trail |
+| Compliance Service | `action_definition` | `action_definitions` | Notification/escalation action templates |
+| Compliance Service | `compliance_event_log` | `compliance_event_logs` | Compliance processing outcomes |
+| Intelligence Service | `receiver_adaptor` | `receiver_adaptors` | FHIR endpoint adaptor registry |
+| Intelligence Service | `destination_adaptor_mapping` | `destination_adaptor_mappings` | Destination-to-adaptor routing |
+| Intelligence Service | `intelligence_delivery` | `intelligence_deliveries` | Intelligence action delivery outcomes |
+
+> All tables reside in the shared `ccedb` PostgreSQL database. One Debezium source connector captures all 11 tables.
 
 ### 4.2 Analytics Storage Layer
 
@@ -140,9 +144,8 @@ graph TB
 
 ```mermaid
 flowchart LR
-    subgraph Sources["CCE PostgreSQL Databases"]
-        PG1["collector-service DB"]
-        PG2["compliance-service DB"]
+    subgraph Sources["CCE Platform"]
+        PG["PostgreSQL 16<br/>(ccedb — shared)"]
     end
 
     subgraph CDC["CDC Pipeline"]
@@ -152,7 +155,7 @@ flowchart LR
     end
 
     subgraph Analytics["Analytics Layer"]
-        CH["ClickHouse<br/>(tables + MVs)"]
+        CH["ClickHouse<br/>(tables + MVs + dictionaries)"]
     end
 
     subgraph Presentation
@@ -160,8 +163,7 @@ flowchart LR
         G["Grafana<br/>(operational monitoring)"]
     end
 
-    PG1 --> DEB
-    PG2 --> DEB
+    PG --> DEB
     DEB --> KF
     KF --> SINK
     SINK --> CH

@@ -389,7 +389,7 @@ curl -X PUT http://localhost:8083/connectors/cce-clickhouse-sink/pause
 # Reset offset for specific topic
 kafka-consumer-groups.sh --bootstrap-server $KAFKA_BOOTSTRAP \
   --group connect-cce-clickhouse-sink \
-  --topic cce.cdc.compliance_service.public.protocol_instance \
+  --topic cce.cdc.public.protocol_instance \
   --reset-offsets --to-earliest --execute
 
 # Resume sink
@@ -420,7 +420,7 @@ curl -s http://localhost:8083/connectors/cce-clickhouse-sink/status | jq '.tasks
 
 # Verify data in Kafka topic
 kafka-console-consumer.sh --bootstrap-server $KAFKA_BOOTSTRAP \
-  --topic cce.cdc.compliance_service.public.protocol_instance \
+  --topic cce.cdc.public.protocol_instance \
   --from-beginning --max-messages 1
 
 # Check ClickHouse insert errors

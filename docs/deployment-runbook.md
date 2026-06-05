@@ -45,20 +45,20 @@
 # Pre-create CDC topics for partition control (Debezium will auto-create otherwise)
 KAFKA_BOOTSTRAP=${KAFKA_BOOTSTRAP:-localhost:9092}
 
-# Collector service tables
-kafka-topics.sh --bootstrap-server $KAFKA_BOOTSTRAP --create --topic cce.cdc.collector_service.public.inbound_event_log --partitions 6 --replication-factor 3
-kafka-topics.sh --bootstrap-server $KAFKA_BOOTSTRAP --create --topic cce.cdc.collector_service.public.receiver_adaptor --partitions 3 --replication-factor 3
-kafka-topics.sh --bootstrap-server $KAFKA_BOOTSTRAP --create --topic cce.cdc.collector_service.public.destination_adaptor_mapping --partitions 3 --replication-factor 3
+# High-volume tables (6 partitions)
+kafka-topics.sh --bootstrap-server $KAFKA_BOOTSTRAP --create --topic cce.cdc.public.inbound_event_log --partitions 6 --replication-factor 3
+kafka-topics.sh --bootstrap-server $KAFKA_BOOTSTRAP --create --topic cce.cdc.public.protocol_instance --partitions 6 --replication-factor 3
+kafka-topics.sh --bootstrap-server $KAFKA_BOOTSTRAP --create --topic cce.cdc.public.step_instance --partitions 6 --replication-factor 3
+kafka-topics.sh --bootstrap-server $KAFKA_BOOTSTRAP --create --topic cce.cdc.public.deviation --partitions 6 --replication-factor 3
+kafka-topics.sh --bootstrap-server $KAFKA_BOOTSTRAP --create --topic cce.cdc.public.intelligence_event_log --partitions 6 --replication-factor 3
+kafka-topics.sh --bootstrap-server $KAFKA_BOOTSTRAP --create --topic cce.cdc.public.intelligence_delivery --partitions 6 --replication-factor 3
+kafka-topics.sh --bootstrap-server $KAFKA_BOOTSTRAP --create --topic cce.cdc.public.compliance_event_log --partitions 6 --replication-factor 3
 
-# Compliance service tables
-kafka-topics.sh --bootstrap-server $KAFKA_BOOTSTRAP --create --topic cce.cdc.compliance_service.public.protocol_definition --partitions 3 --replication-factor 3
-kafka-topics.sh --bootstrap-server $KAFKA_BOOTSTRAP --create --topic cce.cdc.compliance_service.public.protocol_instance --partitions 6 --replication-factor 3
-kafka-topics.sh --bootstrap-server $KAFKA_BOOTSTRAP --create --topic cce.cdc.compliance_service.public.step_instance --partitions 6 --replication-factor 3
-kafka-topics.sh --bootstrap-server $KAFKA_BOOTSTRAP --create --topic cce.cdc.compliance_service.public.deviation --partitions 6 --replication-factor 3
-kafka-topics.sh --bootstrap-server $KAFKA_BOOTSTRAP --create --topic cce.cdc.compliance_service.public.intelligence_event_log --partitions 6 --replication-factor 3
-kafka-topics.sh --bootstrap-server $KAFKA_BOOTSTRAP --create --topic cce.cdc.compliance_service.public.intelligence_delivery --partitions 6 --replication-factor 3
-kafka-topics.sh --bootstrap-server $KAFKA_BOOTSTRAP --create --topic cce.cdc.compliance_service.public.action_definition --partitions 3 --replication-factor 3
-kafka-topics.sh --bootstrap-server $KAFKA_BOOTSTRAP --create --topic cce.cdc.compliance_service.public.compliance_event_log --partitions 6 --replication-factor 3
+# Low-volume reference tables (3 partitions)
+kafka-topics.sh --bootstrap-server $KAFKA_BOOTSTRAP --create --topic cce.cdc.public.protocol_definition --partitions 3 --replication-factor 3
+kafka-topics.sh --bootstrap-server $KAFKA_BOOTSTRAP --create --topic cce.cdc.public.action_definition --partitions 3 --replication-factor 3
+kafka-topics.sh --bootstrap-server $KAFKA_BOOTSTRAP --create --topic cce.cdc.public.receiver_adaptor --partitions 3 --replication-factor 3
+kafka-topics.sh --bootstrap-server $KAFKA_BOOTSTRAP --create --topic cce.cdc.public.destination_adaptor_mapping --partitions 3 --replication-factor 3
 ```
 
 ---

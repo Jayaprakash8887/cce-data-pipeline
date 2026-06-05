@@ -201,3 +201,85 @@ AS SELECT
 FROM inbound_event_logs
 WHERE facility_id != '' AND status = 'ACCEPTED'
 GROUP BY day, facility_id, resource_type;
+
+-- ============================================================
+-- Entity × Behavior Cross-Dimensional Views
+-- ============================================================
+
+-- Patient-level compliance (enables: compliance by patient, then resolve facility via dict)
+CREATE MATERIALIZED VIEW IF NOT EXISTS mv_compliance_by_patient
+ENGINE = AggregatingMergeTree()
+ORDER BY (patient_id, protocol_definition_id)
+AS SELECT
+    patient_id,
+    protocol_definition_id,
+    protocol_canonical,
+    countState() AS total_enrollments,
+    countIfState(status = 'COMPLETED') AS completed_count,
+    countIfState(status = 'ACTIVE') AS active_count,
+    minState(enrolled_at) AS first_enrolled,
+    maxState(updated_at) AS last_updated
+FROM protocol_instances
+GROUP BY patient_id, protocol_definition_id, protocol_canonical;
+
+-- Patient-level deviations (JOIN deviations → protocol_instances for patient_id)
+CREATE MATERIALIZED VIEW IF NOT EXISTS mv_deviation_by_patient
+ENGINE = AggregatingMergeTree()
+PARTITION BY toYYYYMM(day)
+ORDER BY (patient_id, deviation_type, day)
+AS SELECT
+    toStartOfDay(d.detected_at) AS day,
+    pi.patient_id AS patient_id,
+    d.deviation_type,
+    countState() AS deviation_count,
+    uniqState(d.protocol_instance_id) AS unique_protocols
+FROM deviations d
+INNER JOIN protocol_instances pi ON d.protocol_instance_id = pi.id
+GROUP BY day, pi.patient_id, d.deviation_type;
+
+-- Patient-level intelligence actions (enables: intelligence actions per patient per type)
+CREATE MATERIALIZED VIEW IF NOT EXISTS mv_intelligence_by_patient
+ENGINE = AggregatingMergeTree()
+PARTITION BY toYYYYMM(day)
+ORDER BY (subject, action_type, day)
+AS SELECT
+    toStartOfDay(created_at) AS day,
+    subject,
+    action_type,
+    intelligence_destination,
+    trigger_reason,
+    countState() AS trigger_count
+FROM intelligence_event_logs
+GROUP BY day, subject, action_type, intelligence_destination, trigger_reason;
+
+-- Patient-level delivery outcomes (enables: delivery success/failure per patient)
+CREATE MATERIALIZED VIEW IF NOT EXISTS mv_delivery_by_patient
+ENGINE = AggregatingMergeTree()
+PARTITION BY toYYYYMM(day)
+ORDER BY (subject, destination, action_type, day)
+AS SELECT
+    toStartOfDay(created_at) AS day,
+    subject,
+    destination,
+    action_type,
+    severity,
+    countState() AS total_deliveries,
+    countIfState(status = 'DELIVERED') AS delivered,
+    countIfState(status = 'FAILED') AS failed
+FROM intelligence_deliveries
+GROUP BY day, subject, destination, action_type, severity;
+
+-- Step states with protocol dimension (enables: step timeliness per protocol)
+CREATE MATERIALIZED VIEW IF NOT EXISTS mv_step_states_by_protocol
+ENGINE = AggregatingMergeTree()
+PARTITION BY toYYYYMM(day)
+ORDER BY (protocol_instance_id, state, day)
+AS SELECT
+    toStartOfDay(updated_at) AS day,
+    protocol_instance_id,
+    action_id,
+    state,
+    completion_status,
+    countState() AS step_count
+FROM step_instances
+GROUP BY day, protocol_instance_id, action_id, state, completion_status;

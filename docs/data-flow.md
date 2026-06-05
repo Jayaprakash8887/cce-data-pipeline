@@ -6,9 +6,8 @@ The CCE Data Pipeline uses a **CDC-only** architecture. All data flows from comm
 
 ```mermaid
 flowchart LR
-    subgraph Sources
-        PG1["cce-collector-service<br/>(PostgreSQL)"]
-        PG2["cce-compliance-service<br/>(PostgreSQL)"]
+    subgraph Source
+        PG["PostgreSQL 16<br/>Shared by all CCE services"]
     end
 
     subgraph CDC Layer
@@ -23,8 +22,7 @@ flowchart LR
         SS["Apache Superset"]
     end
 
-    PG1 -->|WAL| DEB
-    PG2 -->|WAL| DEB
+    PG -->|WAL| DEB
     DEB --> KAFKA
     KAFKA --> SINK
     SINK --> CH
@@ -55,24 +53,26 @@ Debezium reads the PostgreSQL Write-Ahead Log (WAL) and produces change events t
 
 **Topic naming convention:**
 ```
-cce.cdc.<database>.public.<table_name>
+cce.cdc.public.<table_name>
 ```
 
-**CDC Topics:**
+**CDC Topics (all from shared `ccedb` database, topic prefix `cce.cdc`):**
 
-| Source DB | Source Table | Kafka Topic |
-|-----------|-------------|-------------|
-| collector-service | `inbound_event_log` | `cce.cdc.collector_service.public.inbound_event_log` |
-| compliance-service | `protocol_definition` | `cce.cdc.compliance_service.public.protocol_definition` |
-| compliance-service | `protocol_instance` | `cce.cdc.compliance_service.public.protocol_instance` |
-| compliance-service | `step_instance` | `cce.cdc.compliance_service.public.step_instance` |
-| compliance-service | `deviation` | `cce.cdc.compliance_service.public.deviation` |
-| compliance-service | `intelligence_event_log` | `cce.cdc.compliance_service.public.intelligence_event_log` |
-| compliance-service | `intelligence_delivery` | `cce.cdc.compliance_service.public.intelligence_delivery` |
-| compliance-service | `action_definition` | `cce.cdc.compliance_service.public.action_definition` |
-| compliance-service | `compliance_event_log` | `cce.cdc.compliance_service.public.compliance_event_log` |
-| collector-service | `receiver_adaptor` | `cce.cdc.collector_service.public.receiver_adaptor` |
-| collector-service | `destination_adaptor_mapping` | `cce.cdc.collector_service.public.destination_adaptor_mapping` |
+| Table Owner | Source Table | Kafka Topic |
+|-------------|-------------|-------------|
+| Collector Service | `inbound_event_log` | `cce.cdc.public.inbound_event_log` |
+| Compliance Service | `protocol_definition` | `cce.cdc.public.protocol_definition` |
+| Compliance Service | `protocol_instance` | `cce.cdc.public.protocol_instance` |
+| Compliance Service | `step_instance` | `cce.cdc.public.step_instance` |
+| Compliance Service | `deviation` | `cce.cdc.public.deviation` |
+| Compliance Service | `intelligence_event_log` | `cce.cdc.public.intelligence_event_log` |
+| Compliance Service | `action_definition` | `cce.cdc.public.action_definition` |
+| Compliance Service | `compliance_event_log` | `cce.cdc.public.compliance_event_log` |
+| Intelligence Service | `intelligence_delivery` | `cce.cdc.public.intelligence_delivery` |
+| Intelligence Service | `receiver_adaptor` | `cce.cdc.public.receiver_adaptor` |
+| Intelligence Service | `destination_adaptor_mapping` | `cce.cdc.public.destination_adaptor_mapping` |
+
+> **Note:** All CCE services share a single PostgreSQL database (`ccedb`). Debezium uses `topic.prefix=cce.cdc` and captures the `public` schema — topic pattern: `cce.cdc.public.<table>`.
 
 ### 2.2 Kafka → ClickHouse Sink
 
@@ -242,6 +242,11 @@ Materialized Views in ClickHouse are triggered on INSERT — they read from the 
 | `mv_intelligence_summary` | `intelligence_event_logs` | AggregatingMergeTree | `countState()`, `uniqState(subject)` per action_type/day |
 | `mv_delivery_performance_hourly` | `intelligence_deliveries` | AggregatingMergeTree | `avgState(latency_ms)`, `countIfState(status='DELIVERED')` per destination/hour |
 | `mv_step_states_daily` | `step_instances` | AggregatingMergeTree | `countIfState(state='DUE')`, etc. per protocol_instance_id/day |
+| `mv_compliance_by_patient` | `protocol_instances` | AggregatingMergeTree | `countState()`, `countIfState(status)` per patient/protocol |
+| `mv_deviation_by_patient` | `deviations` JOIN `protocol_instances` | AggregatingMergeTree | `countState()` per patient/deviation_type/day |
+| `mv_intelligence_by_patient` | `intelligence_event_logs` | AggregatingMergeTree | `countState()` per subject/action_type/day |
+| `mv_delivery_by_patient` | `intelligence_deliveries` | AggregatingMergeTree | `countIfState(status)` per subject/destination/day |
+| `mv_step_states_by_protocol` | `step_instances` | AggregatingMergeTree | `countState()` per protocol_instance_id/state/day |
 
 ### 4.3 Query Patterns
 
@@ -320,6 +325,53 @@ LAYOUT(HASHED());
 ```
 
 Used with `dictGet()` for efficient protocol name lookups without JOIN.
+
+### `dict_patient_facility`
+
+Maps patient → most recent facility (refreshed every 5–10 min):
+
+```sql
+CREATE DICTIONARY dict_patient_facility (
+    patient_id String,
+    facility_id String,
+    last_seen DateTime64(3)
+)
+PRIMARY KEY patient_id
+SOURCE(CLICKHOUSE(
+    QUERY 'SELECT subject AS patient_id,
+           argMax(facility_id, received_at) AS facility_id,
+           max(received_at) AS last_seen
+    FROM cce_analytics.inbound_event_logs
+    WHERE subject != '''' AND facility_id != ''''
+    GROUP BY subject'
+))
+LIFETIME(MIN 300 MAX 600)
+LAYOUT(COMPLEX_KEY_HASHED());
+```
+
+Enables facility-level slicing of patient-centric MVs at query time via `dictGet('dict_patient_facility', 'facility_id', patient_id)`.
+
+### `dict_action_definitions`
+
+Action definition metadata for enriching intelligence/delivery views:
+
+```sql
+CREATE DICTIONARY dict_action_definitions (
+    id UUID,
+    canonical_url String,
+    name String,
+    title String,
+    action_type String,
+    status String
+)
+PRIMARY KEY id
+SOURCE(CLICKHOUSE(
+    TABLE 'action_definitions'
+    DB 'cce_analytics'
+))
+LIFETIME(MIN 60 MAX 300)
+LAYOUT(HASHED());
+```
 
 ---
 
