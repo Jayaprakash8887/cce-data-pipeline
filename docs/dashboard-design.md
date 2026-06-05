@@ -58,8 +58,8 @@ The following dashboards replace the custom React insights-ui application. All d
 **Total Events Today:**
 ```sql
 SELECT count() AS total_events_today
-FROM events_fact
-WHERE event_time >= today();
+FROM inbound_event_logs
+WHERE received_at >= today();
 ```
 
 **Active Patients:**
@@ -254,7 +254,7 @@ SELECT
     toStartOfDay(hour) AS day,
     resource_type,
     sum(event_count) AS events
-FROM event_volume_hourly
+FROM mv_event_volume_hourly
 WHERE hour BETWEEN '{{ start_date }}' AND '{{ end_date }}'
 GROUP BY day, resource_type
 ORDER BY day;
@@ -268,7 +268,7 @@ SELECT
     countIf(status = 'ACCEPTED') AS accepted,
     countIf(status = 'REJECTED') AS rejected,
     round(countIf(status = 'ACCEPTED') / nullIf(count(), 0) * 100, 1) AS quality_score
-FROM inbound_events
+FROM inbound_event_logs
 WHERE received_at >= today() - INTERVAL 7 DAY
 GROUP BY source
 ORDER BY quality_score ASC;
@@ -281,7 +281,7 @@ SELECT
     source,
     toStartOfDay(hour) AS day,
     sum(event_count) AS events
-FROM event_volume_hourly
+FROM mv_event_volume_hourly
 WHERE hour BETWEEN '{{ start_date }}' AND '{{ end_date }}'
 GROUP BY source, day
 ORDER BY day, source;
@@ -577,15 +577,15 @@ ORDER BY retry_rate_pct DESC;
 
 ### Key Queries
 
-**Trigger Volume by Severity (trend):**
+**Trigger Volume by Action Type (trend):**
 ```sql
 SELECT
-    toStartOfDay(detected_at) AS day,
-    severity,
+    toStartOfDay(created_at) AS day,
+    action_type,
     count() AS triggers
-FROM intelligence_events
-WHERE detected_at BETWEEN '{{ start_date }}' AND '{{ end_date }}'
-GROUP BY day, severity
+FROM intelligence_event_logs
+WHERE created_at BETWEEN '{{ start_date }}' AND '{{ end_date }}'
+GROUP BY day, action_type
 ORDER BY day;
 ```
 
@@ -597,8 +597,8 @@ SELECT
     step_state,
     count() AS count,
     uniq(subject) AS unique_patients
-FROM intelligence_events
-WHERE detected_at BETWEEN '{{ start_date }}' AND '{{ end_date }}'
+FROM intelligence_event_logs
+WHERE created_at BETWEEN '{{ start_date }}' AND '{{ end_date }}'
 GROUP BY action_type, intelligence_destination, step_state
 ORDER BY count DESC;
 ```
@@ -653,10 +653,10 @@ SELECT
     count() AS total_events,
     uniq(patient_id) AS unique_patients,
     count(DISTINCT resource_type) AS resource_types,
-    max(event_time) AS last_active
-FROM events_fact
-WHERE practitioner_ref IS NOT NULL
-    AND event_time BETWEEN '{{ start_date }}' AND '{{ end_date }}'
+    max(received_at) AS last_active
+FROM inbound_event_logs
+WHERE practitioner_ref != ''
+    AND received_at BETWEEN '{{ start_date }}' AND '{{ end_date }}'
     {% if facility_id %} AND facility_id = '{{ facility_id }}' {% endif %}
 GROUP BY practitioner_ref, facility_id
 ORDER BY total_events DESC
@@ -666,21 +666,21 @@ LIMIT 50;
 **Practitioner × Deviation Correlation:**
 ```sql
 SELECT
-    ef.practitioner_ref,
-    ef.facility_id,
-    uniq(ef.patient_id) AS total_patients,
-    uniqIf(ef.patient_id, d.id IS NOT NULL) AS patients_with_deviations,
+    iel.practitioner_ref,
+    iel.facility_id,
+    uniq(iel.patient_id) AS total_patients,
+    uniqIf(iel.patient_id, d.id IS NOT NULL) AS patients_with_deviations,
     round(
-        uniqIf(ef.patient_id, d.id IS NOT NULL) /
-        nullIf(uniq(ef.patient_id), 0) * 100, 1
+        uniqIf(iel.patient_id, d.id IS NOT NULL) /
+        nullIf(uniq(iel.patient_id), 0) * 100, 1
     ) AS deviation_patient_pct
-FROM events_fact ef
-LEFT JOIN protocol_instances pi FINAL ON ef.patient_id = pi.patient_id
+FROM inbound_event_logs iel
+LEFT JOIN protocol_instances pi FINAL ON iel.patient_id = pi.patient_id
 LEFT JOIN deviations d ON d.protocol_instance_id = pi.id
     AND d.detected_at >= today() - INTERVAL 30 DAY
-WHERE ef.practitioner_ref IS NOT NULL
-    AND ef.event_time >= today() - INTERVAL 30 DAY
-GROUP BY ef.practitioner_ref, ef.facility_id
+WHERE iel.practitioner_ref != ''
+    AND iel.received_at >= today() - INTERVAL 30 DAY
+GROUP BY iel.practitioner_ref, iel.facility_id
 ORDER BY deviation_patient_pct DESC;
 ```
 
@@ -721,55 +721,48 @@ ORDER BY deviation_patient_pct DESC;
 
 ### Key Queries
 
-**Transition Volume Trend:**
+**Step State Distribution Trend:**
 ```sql
 SELECT
-    toStartOfDay(triggered_at) AS day,
-    transition_type,
-    count() AS transitions
-FROM step_transitions
-WHERE triggered_at BETWEEN '{{ start_date }}' AND '{{ end_date }}'
-GROUP BY day, transition_type
+    toStartOfDay(updated_at) AS day,
+    state,
+    count() AS steps
+FROM step_instances FINAL
+WHERE updated_at BETWEEN '{{ start_date }}' AND '{{ end_date }}'
+GROUP BY day, state
 ORDER BY day;
 ```
 
 **Escalation Rate (DUE → OVERDUE and OVERDUE → MISSED):**
 ```sql
 SELECT
-    toStartOfWeek(triggered_at) AS week,
-    countIf(transition_type = 'PENDING_TO_DUE') AS became_due,
-    countIf(transition_type = 'DUE_TO_OVERDUE') AS became_overdue,
-    countIf(transition_type = 'OVERDUE_TO_MISSED') AS became_missed,
-    round(countIf(transition_type = 'DUE_TO_OVERDUE') /
-          nullIf(countIf(transition_type = 'PENDING_TO_DUE'), 0) * 100, 1) AS due_to_overdue_pct,
-    round(countIf(transition_type = 'OVERDUE_TO_MISSED') /
-          nullIf(countIf(transition_type = 'DUE_TO_OVERDUE'), 0) * 100, 1) AS overdue_to_missed_pct
-FROM step_transitions
-WHERE triggered_at BETWEEN '{{ start_date }}' AND '{{ end_date }}'
+    toStartOfWeek(updated_at) AS week,
+    countIf(state = 'DUE') AS became_due,
+    countIf(state = 'OVERDUE') AS became_overdue,
+    countIf(state = 'MISSED') AS became_missed,
+    round(countIf(state = 'OVERDUE') /
+          nullIf(countIf(state = 'DUE'), 0) * 100, 1) AS due_to_overdue_pct,
+    round(countIf(state = 'MISSED') /
+          nullIf(countIf(state = 'OVERDUE'), 0) * 100, 1) AS overdue_to_missed_pct
+FROM step_instances FINAL
+WHERE updated_at BETWEEN '{{ start_date }}' AND '{{ end_date }}'
 GROUP BY week
 ORDER BY week;
 ```
 
-**Avg Time Between Escalations (per step):**
+**Avg Time Between State Changes (per action):**
 ```sql
 SELECT
     si.action_id,
     pd.name AS protocol_name,
-    round(avg(dateDiff('hour', st_due.triggered_at, st_overdue.triggered_at)), 1) AS avg_hours_due_to_overdue,
-    round(avg(dateDiff('hour', st_overdue.triggered_at, st_missed.triggered_at)), 1) AS avg_hours_overdue_to_missed,
-    count(DISTINCT st_due.step_instance_id) AS sample_size
-FROM step_transitions st_due
-LEFT JOIN step_transitions st_overdue
-    ON st_due.step_instance_id = st_overdue.step_instance_id
-    AND st_overdue.transition_type = 'DUE_TO_OVERDUE'
-LEFT JOIN step_transitions st_missed
-    ON st_due.step_instance_id = st_missed.step_instance_id
-    AND st_missed.transition_type = 'OVERDUE_TO_MISSED'
-JOIN step_instances si FINAL ON st_due.step_instance_id = si.id
+    round(avg(dateDiff('hour', si.due_date, si.overdue_date)), 1) AS avg_hours_due_to_overdue,
+    round(avg(dateDiff('hour', si.overdue_date, si.missed_date)), 1) AS avg_hours_overdue_to_missed,
+    count() AS sample_size
+FROM step_instances si FINAL
 JOIN protocol_instances pi FINAL ON si.protocol_instance_id = pi.id
 JOIN protocol_definitions pd FINAL ON pi.protocol_definition_id = pd.id
-WHERE st_due.transition_type = 'PENDING_TO_DUE'
-    AND st_due.triggered_at BETWEEN '{{ start_date }}' AND '{{ end_date }}'
+WHERE si.overdue_date IS NOT NULL
+    AND si.updated_at BETWEEN '{{ start_date }}' AND '{{ end_date }}'
 GROUP BY si.action_id, pd.name
 ORDER BY avg_hours_due_to_overdue;
 ```
@@ -784,22 +777,24 @@ Register these as Superset datasets for drag-and-drop chart building:
 
 | Dataset Name | Source | Description |
 |-------------|--------|-------------|
-| `Events Fact` | `events_fact` | All clinical events (enriched) |
-| `Event Volume (Hourly)` | `event_volume_hourly` | Pre-aggregated event counts |
+| `Inbound Event Logs` | `inbound_event_logs` | All clinical events with MATERIALIZED fields |
+| `Event Volume (Hourly)` | `mv_event_volume_hourly` | Pre-aggregated hourly event counts |
+| `Event Volume (Daily)` | `mv_event_volume_daily` | Pre-aggregated daily event counts |
 | `Protocol Instances` | `protocol_instances FINAL` | Patient enrollments |
 | `Step Instances` | `step_instances FINAL` | Protocol step tracking |
 | `Deviations` | `deviations` | Compliance deviations |
-| `Inbound Events` | `inbound_events` | Ingestion audit |
-| `Intelligence Events` | `intelligence_events` | Triggers and actions |
+| `Intelligence Event Logs` | `intelligence_event_logs FINAL` | Intelligence trigger audit trail |
+| `Intelligence Deliveries` | `intelligence_deliveries FINAL` | Delivery outcomes per adaptor |
+| `Action Definitions` | `action_definitions FINAL` | Action template metadata |
 | `Protocol Definitions` | `protocol_definitions FINAL` | Protocol metadata |
+| `Compliance Event Logs` | `compliance_event_logs` | Compliance processing audit |
 | `Compliance Summary (MV)` | `mv_compliance_summary` | Pre-aggregated compliance |
 | `Deviation Trends (MV)` | `mv_deviation_trends` | Pre-aggregated deviations |
-| `Intelligence Deliveries` | `intelligence_deliveries FINAL` | Delivery outcomes per adaptor |
-| `Intelligence Event Logs` | `intelligence_event_logs FINAL` | Intelligence trigger audit trail |
-| `Action Definitions` | `action_definitions FINAL` | Action template metadata |
+| `Facility Summary (MV)` | `mv_facility_summary` | Pre-aggregated facility metrics |
+| `Practitioner Summary (MV)` | `mv_practitioner_summary` | Pre-aggregated practitioner metrics |
 | `Delivery Performance (MV)` | `mv_delivery_performance_hourly` | Pre-aggregated delivery metrics |
-| `Step Transitions` | `step_transitions` | Scheduler state transitions |
-| `Scheduler Transitions (MV)` | `mv_scheduler_transitions_daily` | Pre-aggregated scheduler metrics |
+| `Step States (MV)` | `mv_step_states_daily` | Pre-aggregated step state distribution |
+| `Ingestion Quality (MV)` | `mv_ingestion_quality` | Source quality metrics |
 
 ### 9.2 Roles & Permissions
 
@@ -814,7 +809,7 @@ Register these as Superset datasets for drag-and-drop chart building:
 
 ```python
 # Superset RLS rule for facility-based access
-# Applied to datasets: protocol_instances, step_instances, deviations, events_fact
+# Applied to datasets: protocol_instances, step_instances, deviations, inbound_event_logs
 
 # Rule: facility_id = {{ current_user.facility_id }}
 # Clause: facility_id IN ('FAC-001', 'FAC-002')  -- per user/role assignment
@@ -840,7 +835,7 @@ Configure in Superset Alerts:
 | High Deviation Rate | Deviations > 50 in last hour | Email to supervisors | Warning |
 | Source Quality Drop | Acceptance rate < 70% for any source | Email + Slack | Critical |
 | Zero Events | No events received in 30 minutes | PagerDuty / Slack | Critical |
-| Pipeline Lag | Flink consumer lag > 100k messages | Slack #ops channel | Warning |
+| Pipeline Lag | CDC sink consumer lag > 10k messages | Slack #ops channel | Warning |
 | Adaptor Failure Spike | Any adaptor success rate < 80% in last hour | Email + Slack | Critical |
 | Adaptor Timeout | Adaptor P95 latency > 10s for 15 min | Slack #ops channel | Warning |
 | Adaptor Down | Zero deliveries from adaptor in 30 min | PagerDuty / Slack | Critical |
@@ -890,42 +885,40 @@ Superset provides built-in export capabilities replacing the custom `ExportServi
 
 ## 13. Dashboard 11: Pipeline Health (Grafana)
 
-**Purpose:** Monitor the data pipeline infrastructure — Flink jobs, Kafka consumer lag, ClickHouse performance, and end-to-end latency. Deployed in **Grafana** (not Superset) to leverage native Prometheus integration.
+**Purpose:** Monitor the data pipeline infrastructure — CDC connectors, Kafka consumer lag, ClickHouse performance, and end-to-end latency. Deployed in **Grafana** (not Superset) to leverage native Prometheus integration.
 
 ### Layout
 
 ```
 ┌──────────────────────────────────────────────────────────────────────────┐
-│  FILTERS: [Time Range] [Job Name] [Topic]                                │
+│  FILTERS: [Time Range] [Connector] [Topic]                               │
 ├────────────────┬────────────────┬────────────────┬───────────────────────┤
-│  KPI: Flink    │  KPI: Max      │  KPI: CH       │  KPI: End-to-End      │
-│  Jobs Running  │  Consumer Lag  │  Insert Rate   │  Latency (P95)        │
+│  KPI: CDC      │  KPI: Max      │  KPI: CH       │  KPI: End-to-End      │
+│  Connectors OK │  Consumer Lag  │  Insert Rate   │  Latency (P95)        │
 ├────────────────┴────────────────┴────────────────┴───────────────────────┤
 │                                                                          │
-│  [Multi-Line] Kafka Consumer Lag by Topic/Partition (messages)            │
-│  (one line per topic: cce.events.inbound, cce.intelligence.triggers,     │
-│   cce.scheduler.triggers)                                                │
+│  [Multi-Line] CDC Sink Throughput (records/sec per topic)                │
 │                                                                          │
 ├─────────────────────────────────┬────────────────────────────────────────┤
 │  [Line Chart]                   │  [Line Chart]                          │
-│  Flink Checkpoint Duration      │  Flink Throughput                      │
-│  (ms, per job)                  │  (records/sec per job)                 │
+│  ClickHouse Insert Rate         │  Kafka Consumer Lag                    │
+│  (rows/sec)                     │  (by topic/partition)                  │
 │                                 │                                        │
 ├─────────────────────────────────┼────────────────────────────────────────┤
 │  [Gauge]                        │  [Line Chart]                          │
-│  Flink Backpressure             │  ClickHouse Queries in Flight          │
-│  (per task slot)                │  + Merge Operations                    │
+│  Connector Status               │  ClickHouse Queries in Flight          │
+│  (green=RUNNING, red=FAILED)    │  + Merge Operations                    │
 │                                 │                                        │
 ├─────────────────────────────────┼────────────────────────────────────────┤
 │  [Line Chart]                   │  [Line Chart]                          │
 │  End-to-End Latency             │  ClickHouse Disk Usage                 │
-│  (event_time → processed_at)    │  (GB used / total, with threshold)    │
+│  (commit → CH insert time)      │  (GB used / total, with threshold)    │
 │  P50, P95, P99                  │                                        │
 │                                 │                                        │
 ├─────────────────────────────────┼────────────────────────────────────────┤
 │  [Status Panel]                 │  [Table]                               │
 │  Kafka Connect Connectors       │  CDC Replication Slot Status           │
-│  (green=RUNNING, red=FAILED)    │  slot_name | lag_bytes | active        │
+│  (source + sink status)         │  slot_name | lag_bytes | active        │
 │                                 │                                        │
 └─────────────────────────────────┴────────────────────────────────────────┘
 ```
@@ -935,12 +928,11 @@ Superset provides built-in export capabilities replacing the custom `ExportServi
 **End-to-End Latency (ClickHouse query for Grafana):**
 ```sql
 SELECT
-    toStartOfMinute(processed_at) AS minute,
-    quantile(0.50)(dateDiff('second', event_time, processed_at)) AS p50_latency_sec,
-    quantile(0.95)(dateDiff('second', event_time, processed_at)) AS p95_latency_sec,
-    quantile(0.99)(dateDiff('second', event_time, processed_at)) AS p99_latency_sec
-FROM events_fact
-WHERE processed_at >= now() - INTERVAL 1 HOUR
+    toStartOfMinute(received_at) AS minute,
+    quantile(0.95)(dateDiff('second', event_time, received_at)) AS p95_latency_sec
+FROM inbound_event_logs
+WHERE received_at >= now() - INTERVAL 1 HOUR
+    AND event_time IS NOT NULL
 GROUP BY minute
 ORDER BY minute;
 ```
@@ -950,19 +942,13 @@ ORDER BY minute;
 rate(ClickHouseProfileEvents_InsertedRows[5m])
 ```
 
-**Flink Checkpoint Duration (Prometheus):**
-```promql
-flink_jobmanager_job_lastCheckpointDuration{job_name=~"event-enrichment|intelligence-tracker|scheduler-tracker"}
-```
-
 **Kafka Consumer Lag (Prometheus):**
 ```promql
-kafka_consumer_group_lag{group="cce-data-pipeline-flink",topic=~"cce\\..*"}
+kafka_consumer_group_lag{group=~"connect-cce-clickhouse-sink.*",topic=~"cce\\.cdc\\..*"}
 ```
 
-**CDC Replication Slot Lag (ClickHouse query via pg_stat_replication view):**
+**CDC Replication Slot Lag (PostgreSQL datasource in Grafana):**
 ```sql
--- Run against source PostgreSQL (Grafana PostgreSQL datasource)
 SELECT
     slot_name,
     pg_wal_lsn_diff(pg_current_wal_lsn(), confirmed_flush_lsn) AS lag_bytes,
@@ -975,9 +961,9 @@ WHERE slot_name = 'cce_analytics_slot';
 
 | Alert | PromQL / Query | Threshold | Severity |
 |-------|---------------|-----------|----------|
-| Flink job down | `flink_jobmanager_job_status != 1` | Any job not RUNNING for 2min | Critical |
-| Consumer lag high | `kafka_consumer_group_lag > 100000` | Sustained 5 min | Warning |
+| CDC Sink Connector Down | Connector status != RUNNING | 2 min | Critical |
+| Consumer lag high | `kafka_consumer_group_lag > 10000` | Sustained 5 min | Warning |
 | E2E latency high | P95 latency > 300s | Sustained 5 min | Warning |
 | ClickHouse disk full | `ClickHouseAsyncMetrics_DiskUsed / DiskTotal > 0.8` | — | Warning |
 | CDC slot lag | `lag_bytes > 100MB` | Sustained 5 min | Critical |
-| Flink checkpoint failing | `increase(flink_jobmanager_job_numberOfFailedCheckpoints[10m]) > 3` | — | Warning |
+| ClickHouse insert stall | Zero inserts for 5 min | — | Warning |

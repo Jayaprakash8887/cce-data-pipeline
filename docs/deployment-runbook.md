@@ -14,8 +14,8 @@
 
 ### Infrastructure
 - Kubernetes cluster (1.28+) or Docker Compose host with 16GB+ RAM
-- PostgreSQL 15+ (source database with logical replication enabled)
-- Apache Kafka 3.6+ (6 partitions minimum per topic)
+- PostgreSQL 15+ (source databases with logical replication enabled)
+- Apache Kafka 3.6+ (existing CCE cluster)
 - ClickHouse 24.8+ (dedicated instance, 8GB+ RAM, SSD storage)
 - Redis 7+ (for Superset caching)
 
@@ -32,34 +32,33 @@
 
 ### Pre-deployment Checklist
 - [ ] All secrets provisioned in secret store
-- [ ] PostgreSQL `wal_level = logical` confirmed
+- [ ] PostgreSQL `wal_level = logical` confirmed on both source DBs
 - [ ] PostgreSQL replication slot created: `cce_analytics_slot`
 - [ ] PostgreSQL publication created: `cce_analytics_pub`
-- [ ] Kafka topics created (see Topic List below)
+- [ ] Kafka CDC topics pre-created (or auto-create enabled)
 - [ ] ClickHouse user `cce_pipeline` created with appropriate grants
 - [ ] Network connectivity verified between all services
 - [ ] DNS entries configured for Superset/Grafana
 
-### Kafka Topics
+### Kafka Topics (CDC)
 ```bash
-# Create all required topics (adjust replication factor for production)
-kafka-topics.sh --bootstrap-server $KAFKA_BOOTSTRAP --create --topic cce.events.inbound --partitions 6 --replication-factor 3
-kafka-topics.sh --bootstrap-server $KAFKA_BOOTSTRAP --create --topic cce.intelligence.triggers --partitions 6 --replication-factor 3
-kafka-topics.sh --bootstrap-server $KAFKA_BOOTSTRAP --create --topic cce.scheduler.triggers --partitions 6 --replication-factor 3
-kafka-topics.sh --bootstrap-server $KAFKA_BOOTSTRAP --create --topic cce.events.inbound.dlq --partitions 3 --replication-factor 3
-kafka-topics.sh --bootstrap-server $KAFKA_BOOTSTRAP --create --topic cce.intelligence.triggers.dlq --partitions 3 --replication-factor 3
+# Pre-create CDC topics for partition control (Debezium will auto-create otherwise)
+KAFKA_BOOTSTRAP=${KAFKA_BOOTSTRAP:-localhost:9092}
 
-# CDC topics (auto-created by Debezium, but pre-create for partition control)
-kafka-topics.sh --bootstrap-server $KAFKA_BOOTSTRAP --create --topic cce.cdc.public.protocol_definition --partitions 3 --replication-factor 3
-kafka-topics.sh --bootstrap-server $KAFKA_BOOTSTRAP --create --topic cce.cdc.public.protocol_instance --partitions 6 --replication-factor 3
-kafka-topics.sh --bootstrap-server $KAFKA_BOOTSTRAP --create --topic cce.cdc.public.step_instance --partitions 6 --replication-factor 3
-kafka-topics.sh --bootstrap-server $KAFKA_BOOTSTRAP --create --topic cce.cdc.public.deviation --partitions 6 --replication-factor 3
-kafka-topics.sh --bootstrap-server $KAFKA_BOOTSTRAP --create --topic cce.cdc.public.inbound_event --partitions 6 --replication-factor 3
-kafka-topics.sh --bootstrap-server $KAFKA_BOOTSTRAP --create --topic cce.cdc.public.intelligence_delivery --partitions 6 --replication-factor 3
-kafka-topics.sh --bootstrap-server $KAFKA_BOOTSTRAP --create --topic cce.cdc.public.intelligence_event_log --partitions 6 --replication-factor 3
-kafka-topics.sh --bootstrap-server $KAFKA_BOOTSTRAP --create --topic cce.cdc.public.action_definition --partitions 3 --replication-factor 3
-kafka-topics.sh --bootstrap-server $KAFKA_BOOTSTRAP --create --topic cce.cdc.public.receiver_adaptor --partitions 3 --replication-factor 3
-kafka-topics.sh --bootstrap-server $KAFKA_BOOTSTRAP --create --topic cce.cdc.public.destination_adaptor_mapping --partitions 3 --replication-factor 3
+# Collector service tables
+kafka-topics.sh --bootstrap-server $KAFKA_BOOTSTRAP --create --topic cce.cdc.collector_service.public.inbound_event_log --partitions 6 --replication-factor 3
+kafka-topics.sh --bootstrap-server $KAFKA_BOOTSTRAP --create --topic cce.cdc.collector_service.public.receiver_adaptor --partitions 3 --replication-factor 3
+kafka-topics.sh --bootstrap-server $KAFKA_BOOTSTRAP --create --topic cce.cdc.collector_service.public.destination_adaptor_mapping --partitions 3 --replication-factor 3
+
+# Compliance service tables
+kafka-topics.sh --bootstrap-server $KAFKA_BOOTSTRAP --create --topic cce.cdc.compliance_service.public.protocol_definition --partitions 3 --replication-factor 3
+kafka-topics.sh --bootstrap-server $KAFKA_BOOTSTRAP --create --topic cce.cdc.compliance_service.public.protocol_instance --partitions 6 --replication-factor 3
+kafka-topics.sh --bootstrap-server $KAFKA_BOOTSTRAP --create --topic cce.cdc.compliance_service.public.step_instance --partitions 6 --replication-factor 3
+kafka-topics.sh --bootstrap-server $KAFKA_BOOTSTRAP --create --topic cce.cdc.compliance_service.public.deviation --partitions 6 --replication-factor 3
+kafka-topics.sh --bootstrap-server $KAFKA_BOOTSTRAP --create --topic cce.cdc.compliance_service.public.intelligence_event_log --partitions 6 --replication-factor 3
+kafka-topics.sh --bootstrap-server $KAFKA_BOOTSTRAP --create --topic cce.cdc.compliance_service.public.intelligence_delivery --partitions 6 --replication-factor 3
+kafka-topics.sh --bootstrap-server $KAFKA_BOOTSTRAP --create --topic cce.cdc.compliance_service.public.action_definition --partitions 3 --replication-factor 3
+kafka-topics.sh --bootstrap-server $KAFKA_BOOTSTRAP --create --topic cce.cdc.compliance_service.public.compliance_event_log --partitions 6 --replication-factor 3
 ```
 
 ---
@@ -82,20 +81,7 @@ clickhouse-client --host $CH_HOST --user cce_pipeline --password $CLICKHOUSE_PAS
   --database cce_analytics --multiquery < schema/04-create-dictionary.sql
 ```
 
-### 2. Build Flink Jobs
-```bash
-cd flink-jobs
-./gradlew clean shadowJar
-
-# Artifacts produced:
-# event-enrichment/build/libs/event-enrichment-1.0.0-all.jar
-# event-volume-aggregator/build/libs/event-volume-aggregator-1.0.0-all.jar
-# intelligence-tracker/build/libs/intelligence-tracker-1.0.0-all.jar
-# scheduler-tracker/build/libs/scheduler-tracker-1.0.0-all.jar
-# cdc-enrichment/build/libs/cdc-enrichment-1.0.0-all.jar
-```
-
-### 3. Build Custom Docker Images
+### 2. Build Custom Docker Images
 ```bash
 docker build -t cce-kafka-connect:latest -f docker/Dockerfile.kafka-connect ./docker
 docker build -t cce-superset:latest -f docker/Dockerfile.superset ./docker
@@ -105,7 +91,7 @@ docker build -t cce-superset:latest -f docker/Dockerfile.superset ./docker
 
 ## Deployment Steps
 
-### Step 1: Start Infrastructure (if not using managed services)
+### Step 1: Start Infrastructure
 ```bash
 docker compose up -d clickhouse redis superset-db prometheus
 # Wait for healthy
@@ -136,30 +122,12 @@ curl -s http://localhost:8083/connectors/cce-cdc-source/status | jq '.connector.
 curl -s http://localhost:8083/connectors/cce-clickhouse-sink/status | jq '.connector.state'
 ```
 
-### Step 4: Deploy Flink Jobs
+### Step 4: Verify CDC Flow
 ```bash
-docker compose up -d flink-jobmanager flink-taskmanager
-
-# Submit jobs (order matters: event-enrichment first)
-FLINK_HOST=http://localhost:8081
-
-flink run -d -m $FLINK_HOST \
-  flink-jobs/event-enrichment/build/libs/event-enrichment-1.0.0-all.jar
-
-flink run -d -m $FLINK_HOST \
-  flink-jobs/event-volume-aggregator/build/libs/event-volume-aggregator-1.0.0-all.jar
-
-flink run -d -m $FLINK_HOST \
-  flink-jobs/intelligence-tracker/build/libs/intelligence-tracker-1.0.0-all.jar
-
-flink run -d -m $FLINK_HOST \
-  flink-jobs/scheduler-tracker/build/libs/scheduler-tracker-1.0.0-all.jar
-
-flink run -d -m $FLINK_HOST \
-  flink-jobs/cdc-enrichment/build/libs/cdc-enrichment-1.0.0-all.jar
-
-# Verify all 5 jobs running
-curl -s $FLINK_HOST/jobs/overview | jq '.jobs[] | {id, state}'
+# Wait for initial snapshot to complete (check for data in ClickHouse)
+sleep 30
+clickhouse-client --host $CH_HOST --user cce_pipeline --password $CLICKHOUSE_PASSWORD \
+  -q "SELECT name, total_rows FROM system.tables WHERE database='cce_analytics' AND total_rows > 0"
 ```
 
 ### Step 5: Deploy Visualization & Monitoring
@@ -181,20 +149,24 @@ docker exec -it cce-superset superset init
 
 ### Automated Validation
 ```bash
-# Run E2E test suite
-./tests/e2e/run-e2e-tests.sh
+# Run schema validation
+./scripts/validate-clickhouse.sh
 
 # Run data quality checks
 ./scripts/data-quality-checks.sh
+
+# Run E2E test suite
+./tests/e2e/run-e2e-tests.sh
 ```
 
 ### Manual Checks
 | Check | Command | Expected |
 |-------|---------|----------|
-| ClickHouse tables | `SELECT count() FROM system.tables WHERE database='cce_analytics'` | >= 14 |
-| Flink jobs | `curl localhost:8081/jobs/overview \| jq '.jobs \| length'` | 5 |
+| ClickHouse tables | `clickhouse-client -q "SELECT count() FROM system.tables WHERE database='cce_analytics'"` | >= 11 tables |
+| MVs exist | `clickhouse-client -q "SELECT count() FROM system.tables WHERE database='cce_analytics' AND engine LIKE '%View%'"` | 11 |
 | Kafka Connect | `curl localhost:8083/connectors` | 2 connectors |
-| Consumer lag | Check Grafana dashboard | < 1000 per partition |
+| Source status | `curl localhost:8083/connectors/cce-cdc-source/status \| jq '.connector.state'` | `RUNNING` |
+| Sink status | `curl localhost:8083/connectors/cce-clickhouse-sink/status \| jq '.connector.state'` | `RUNNING` |
 | Superset health | `curl localhost:8088/health` | `OK` |
 | Grafana health | `curl localhost:3000/api/health` | `{"database":"ok"}` |
 
@@ -202,44 +174,36 @@ docker exec -it cce-superset superset init
 
 ## Rollback Procedures
 
-### Flink Job Rollback
-```bash
-# Cancel the problematic job
-JOB_ID=$(curl -s $FLINK_HOST/jobs/overview | jq -r '.jobs[] | select(.name=="EventEnrichmentJob") | .jid')
-curl -X PATCH "$FLINK_HOST/jobs/$JOB_ID?mode=cancel"
-
-# Redeploy previous version from savepoint
-flink run -d -m $FLINK_HOST \
-  -s /opt/flink/savepoints/savepoint-$JOB_ID-* \
-  flink-jobs/event-enrichment/build/libs/event-enrichment-PREVIOUS-all.jar
-```
-
 ### Kafka Connect Rollback
 ```bash
-# Pause connector
+# Pause connectors
 curl -X PUT http://localhost:8083/connectors/cce-cdc-source/pause
+curl -X PUT http://localhost:8083/connectors/cce-clickhouse-sink/pause
 
 # Delete and recreate with previous config
 curl -X DELETE http://localhost:8083/connectors/cce-cdc-source
+curl -X DELETE http://localhost:8083/connectors/cce-clickhouse-sink
+
+# Restore previous connector configs
 curl -X POST http://localhost:8083/connectors \
   -H "Content-Type: application/json" \
   -d @connectors/cce-cdc-source.PREVIOUS.json
+curl -X POST http://localhost:8083/connectors \
+  -H "Content-Type: application/json" \
+  -d @connectors/cce-clickhouse-sink.PREVIOUS.json
 ```
 
 ### ClickHouse Schema Rollback
 ```bash
-# ClickHouse supports ALTER TABLE for non-destructive changes
-# For destructive changes, restore from backup:
+# Non-destructive: ALTER TABLE for column additions
+# Destructive: Restore from backup
 clickhouse-client --host $CH_HOST --query \
   "RESTORE DATABASE cce_analytics FROM Disk('backups', 'latest/')"
 ```
 
 ### Full Rollback
 ```bash
-# Stop all pipeline services
 docker compose down
-
-# Restore from last known good state
 git checkout LAST_GOOD_TAG
 docker compose up -d
 ```
@@ -248,30 +212,8 @@ docker compose up -d
 
 ## Operational Procedures
 
-### DLQ Replay
-```bash
-# View DLQ message count
-kafka-run-class kafka.tools.GetOffsetShell \
-  --broker-list $KAFKA_BOOTSTRAP \
-  --topic cce.events.inbound.dlq --time -1
-
-# Replay messages back to source topic
-./scripts/replay-dlq.sh cce.events.inbound.dlq $KAFKA_BOOTSTRAP
-```
-
-### Flink Savepoint (before upgrades)
-```bash
-JOB_ID="<job-id>"
-curl -X POST "$FLINK_HOST/jobs/$JOB_ID/savepoints" \
-  -H "Content-Type: application/json" \
-  -d '{"cancel-job": false, "target-directory": "/opt/flink/savepoints"}'
-```
-
 ### ClickHouse Maintenance
 ```bash
-# Optimize tables (merge parts)
-clickhouse-client --query "OPTIMIZE TABLE cce_analytics.events_fact FINAL"
-
 # Check table sizes
 clickhouse-client --query "
   SELECT table, formatReadableSize(sum(bytes_on_disk)) as size, sum(rows) as rows
@@ -279,22 +221,34 @@ clickhouse-client --query "
   WHERE database = 'cce_analytics' AND active
   GROUP BY table ORDER BY sum(bytes_on_disk) DESC"
 
-# TTL / data retention (if configured)
+# Optimize tables (merge parts)
+clickhouse-client --query "OPTIMIZE TABLE cce_analytics.inbound_event_logs FINAL"
+
+# Check merge health
 clickhouse-client --query "
-  ALTER TABLE cce_analytics.events_fact MODIFY TTL event_time + INTERVAL 2 YEAR"
+  SELECT table, count() as parts
+  FROM system.parts WHERE database='cce_analytics' AND active
+  GROUP BY table HAVING parts > 100 ORDER BY parts DESC"
+```
+
+### Connector Restart
+```bash
+# Restart a failed task
+curl -X POST http://localhost:8083/connectors/cce-clickhouse-sink/tasks/0/restart
+
+# Full connector restart
+curl -X POST http://localhost:8083/connectors/cce-clickhouse-sink/restart
 ```
 
 ### Scaling Guidance
 | Component | Scaling Strategy |
 |-----------|-----------------|
-| Flink | Add TaskManagers, increase `taskmanager.numberOfTaskSlots` |
 | ClickHouse | Add replicas (ReplicatedMergeTree), shard for > 1TB/day |
-| Kafka Connect | Increase `tasks.max` in connector config |
-| Kafka | Add partitions (careful: rebalancing) |
+| Kafka Connect | Increase `tasks.max` in connector config; add workers |
 | Superset | Add Celery workers for async queries |
 
 ### Alerting Contacts
 Configure in Grafana → Alerting → Contact Points:
 - **Slack**: `#cce-pipeline-alerts` channel webhook
-- **PagerDuty**: Critical alerts (Flink down, disk full)
+- **PagerDuty**: Critical alerts (connector down, disk full)
 - **Email**: `cce-ops@organization.com`

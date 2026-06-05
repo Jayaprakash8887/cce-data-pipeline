@@ -1,903 +1,452 @@
 # CCE Data Pipeline — Deployment Guide
 
-## 1. Prerequisites
+## Table of Contents
 
-| Requirement | Details |
-|-------------|---------|
-| Kubernetes cluster | 1.27+ (recommended) or Docker Compose for dev |
-| Existing Kafka cluster | 3.5+ (KRaft mode) — already deployed by CCE |
-| Existing PostgreSQL | 16+ with logical replication enabled (`wal_level = logical`) |
-| Existing Keycloak | For Superset OAuth2/OIDC integration |
-| Container registry | For custom Flink job images |
-| Storage class | SSD-backed persistent volumes for ClickHouse |
-
----
-
-## 2. Deployment Topology
-
-```mermaid
-graph TB
-    subgraph "Kubernetes Namespace: cce-data-pipeline"
-        subgraph "Stream Processing"
-            FJM["Flink JobManager<br/>(StatefulSet, 1 replica)"]
-            FTM["Flink TaskManagers<br/>(Deployment, 2 replicas)"]
-        end
-
-        subgraph "CDC"
-            KC["Kafka Connect<br/>(Deployment, 2 replicas)"]
-        end
-
-        subgraph "Analytics Store"
-            CH["ClickHouse<br/>(StatefulSet, 1 replica)<br/>PVC: 500GB SSD"]
-        end
-
-        subgraph "Visualization"
-            SS_WEB["Superset Web<br/>(Deployment, 2 replicas)"]
-            SS_WORKER["Superset Worker<br/>(Deployment, 2 replicas)"]
-            SS_BEAT["Superset Beat<br/>(Deployment, 1 replica)"]
-            REDIS["Redis<br/>(StatefulSet, 1 replica)"]
-            SS_DB["Superset Metadata DB<br/>(PostgreSQL, 1 replica)"]
-        end
-    end
-
-    subgraph "External (Existing)"
-        KAFKA["Kafka Cluster"]
-        PG["CCE PostgreSQL"]
-        KEYCLOAK["Keycloak"]
-    end
-
-    KC --> KAFKA
-    KC --> PG
-    FJM --> KAFKA
-    FTM --> KAFKA
-    FTM --> CH
-    KC --> CH
-    SS_WEB --> CH
-    SS_WEB --> REDIS
-    SS_WEB --> SS_DB
-    SS_WORKER --> CH
-    SS_WORKER --> REDIS
-    SS_WEB --> KEYCLOAK
-```
+1. [Architecture Recap](#1-architecture-recap)
+2. [Prerequisites](#2-prerequisites)
+3. [Infrastructure Components](#3-infrastructure-components)
+4. [Docker Compose (Development)](#4-docker-compose-development)
+5. [Kubernetes (Production)](#5-kubernetes-production)
+6. [Bootstrap Order](#6-bootstrap-order)
+7. [Connector Setup](#7-connector-setup)
+8. [Schema Deployment](#8-schema-deployment)
+9. [Monitoring & Observability](#9-monitoring--observability)
+10. [Health Checks](#10-health-checks)
+11. [Dead Letter Queue (DLQ)](#11-dead-letter-queue-dlq)
+12. [Backfill & Replay](#12-backfill--replay)
+13. [Troubleshooting](#13-troubleshooting)
 
 ---
 
-## 3. Component Deployment
+## 1. Architecture Recap
 
-### 3.1 ClickHouse
-
-**Deployment method:** StatefulSet with PersistentVolumeClaim
-
-```yaml
-# clickhouse-deployment.yaml
-apiVersion: apps/v1
-kind: StatefulSet
-metadata:
-  name: clickhouse
-  namespace: cce-data-pipeline
-spec:
-  serviceName: clickhouse
-  replicas: 1
-  selector:
-    matchLabels:
-      app: clickhouse
-  template:
-    metadata:
-      labels:
-        app: clickhouse
-    spec:
-      containers:
-      - name: clickhouse
-        image: clickhouse/clickhouse-server:24.8-alpine
-        ports:
-        - containerPort: 8123  # HTTP
-          name: http
-        - containerPort: 9000  # Native
-          name: native
-        - containerPort: 9009  # Interserver
-          name: interserver
-        env:
-        - name: CLICKHOUSE_DB
-          value: cce_analytics
-        - name: CLICKHOUSE_USER
-          value: cce_pipeline
-        - name: CLICKHOUSE_PASSWORD
-          valueFrom:
-            secretKeyRef:
-              name: clickhouse-secrets
-              key: password
-        resources:
-          requests:
-            cpu: "4"
-            memory: "16Gi"
-          limits:
-            cpu: "8"
-            memory: "32Gi"
-        volumeMounts:
-        - name: data
-          mountPath: /var/lib/clickhouse
-        - name: config
-          mountPath: /etc/clickhouse-server/config.d/
-        livenessProbe:
-          httpGet:
-            path: /ping
-            port: 8123
-          initialDelaySeconds: 30
-          periodSeconds: 10
-        readinessProbe:
-          httpGet:
-            path: /ping
-            port: 8123
-          initialDelaySeconds: 10
-          periodSeconds: 5
-  volumeClaimTemplates:
-  - metadata:
-      name: data
-    spec:
-      accessModes: ["ReadWriteOnce"]
-      storageClassName: ssd
-      resources:
-        requests:
-          storage: 500Gi
+```
+PostgreSQL (WAL) → Debezium → Kafka (CDC topics) → ClickHouse Sink → ClickHouse → Superset
 ```
 
-**ClickHouse server config (`config.d/custom.xml`):**
-```xml
-<clickhouse>
-    <max_concurrent_queries>100</max_concurrent_queries>
-    <max_memory_usage>28000000000</max_memory_usage>
-    <max_bytes_before_external_group_by>10000000000</max_bytes_before_external_group_by>
+**Services deployed by this pipeline:**
+| Service | Image | Purpose |
+|---------|-------|---------|
+| ClickHouse | `clickhouse/clickhouse-server:24.8-alpine` | OLAP analytics store |
+| Kafka Connect | Custom (Debezium + ClickHouse sink) | CDC source + sink connectors |
+| Redis | `redis:7-alpine` | Superset caching |
+| Superset DB | `postgres:16-alpine` | Superset metadata |
+| Superset | `apache/superset:4.0.2` | Dashboards & visualization |
+| Prometheus | `prom/prometheus:v2.53.0` | Metrics collection |
+| Grafana | `grafana/grafana:11.0.0` | Pipeline health dashboards |
 
-    <merge_tree>
-        <max_suspicious_broken_parts>5</max_suspicious_broken_parts>
-    </merge_tree>
-
-    <query_log>
-        <database>system</database>
-        <table>query_log</table>
-        <partition_by>toYYYYMM(event_date)</partition_by>
-        <flush_interval_milliseconds>7500</flush_interval_milliseconds>
-    </query_log>
-
-    <prometheus>
-        <endpoint>/metrics</endpoint>
-        <port>9363</port>
-        <metrics>true</metrics>
-        <events>true</events>
-        <asynchronous_metrics>true</asynchronous_metrics>
-    </prometheus>
-</clickhouse>
-```
+**Not deployed (by design):** No Flink, no stream processing, no custom application JARs.
 
 ---
 
-### 3.2 Apache Flink
+## 2. Prerequisites
 
-**Deployment method:** Flink Kubernetes Operator (recommended) or standalone StatefulSet
+### Infrastructure Requirements
+- Docker + Docker Compose v2 (development)
+- Kubernetes 1.28+ (production)
+- External: Apache Kafka 3.6+ (existing CCE cluster)
+- External: PostgreSQL 15+ with `wal_level = logical`
 
-```yaml
-# flink-cluster.yaml (Flink Kubernetes Operator CRD)
-apiVersion: flink.apache.org/v1beta1
-kind: FlinkDeployment
-metadata:
-  name: cce-data-pipeline
-  namespace: cce-data-pipeline
-spec:
-  image: registry.internal/cce/flink-pipeline:1.19.1
-  flinkVersion: v1_19
-  flinkConfiguration:
-    taskmanager.numberOfTaskSlots: "4"
-    state.backend: rocksdb
-    state.checkpoints.dir: file:///opt/flink/checkpoints
-    execution.checkpointing.interval: "60000"
-    execution.checkpointing.min-pause: "30000"
-    restart-strategy: fixed-delay
-    restart-strategy.fixed-delay.attempts: "3"
-    restart-strategy.fixed-delay.delay: "10s"
-  serviceAccount: flink-service-account
-  jobManager:
-    resource:
-      memory: "4096m"
-      cpu: 2
-    replicas: 1
-  taskManager:
-    resource:
-      memory: "8192m"
-      cpu: 4
-    replicas: 2
-  job:
-    jarURI: local:///opt/flink/jobs/cce-event-pipeline.jar
-    parallelism: 4
-    upgradeMode: savepoint
-```
-
-**Flink job Docker image:**
-```dockerfile
-FROM flink:1.19.1-java21
-COPY target/cce-event-pipeline-*.jar /opt/flink/jobs/cce-event-pipeline.jar
-COPY lib/flink-connector-kafka-*.jar /opt/flink/lib/
-COPY lib/flink-connector-jdbc-*.jar /opt/flink/lib/
-COPY lib/clickhouse-jdbc-*.jar /opt/flink/lib/
-```
-
----
-
-### 3.3 Kafka Connect (Debezium)
-
-**Deployment method:** Kafka Connect Distributed mode
-
-```yaml
-# kafka-connect-deployment.yaml
-apiVersion: apps/v1
-kind: Deployment
-metadata:
-  name: kafka-connect
-  namespace: cce-data-pipeline
-spec:
-  replicas: 2
-  selector:
-    matchLabels:
-      app: kafka-connect
-  template:
-    metadata:
-      labels:
-        app: kafka-connect
-    spec:
-      containers:
-      - name: kafka-connect
-        image: registry.internal/cce/kafka-connect:3.7.1
-        ports:
-        - containerPort: 8083
-          name: rest
-        env:
-        - name: CONNECT_BOOTSTRAP_SERVERS
-          value: "${KAFKA_BOOTSTRAP_SERVERS}"
-        - name: CONNECT_GROUP_ID
-          value: "cce-data-pipeline-connect"
-        - name: CONNECT_CONFIG_STORAGE_TOPIC
-          value: "cce.connect.configs"
-        - name: CONNECT_OFFSET_STORAGE_TOPIC
-          value: "cce.connect.offsets"
-        - name: CONNECT_STATUS_STORAGE_TOPIC
-          value: "cce.connect.status"
-        - name: CONNECT_KEY_CONVERTER
-          value: "org.apache.kafka.connect.json.JsonConverter"
-        - name: CONNECT_VALUE_CONVERTER
-          value: "org.apache.kafka.connect.json.JsonConverter"
-        resources:
-          requests:
-            cpu: "1"
-            memory: "2Gi"
-          limits:
-            cpu: "2"
-            memory: "4Gi"
-```
-
-**Custom Connect image with Debezium + ClickHouse Sink:**
-```dockerfile
-FROM confluentinc/cp-kafka-connect:7.6.0
-# Debezium PostgreSQL connector
-RUN confluent-hub install --no-prompt debezium/debezium-connector-postgresql:2.6.1
-# ClickHouse sink connector
-RUN confluent-hub install --no-prompt clickhouse/clickhouse-kafka-connect:0.14.0
-```
-
-**Debezium connector registration (POST to Connect REST API):**
-```json
-{
-  "name": "cce-cdc-source",
-  "config": {
-    "connector.class": "io.debezium.connector.postgresql.PostgresConnector",
-    "database.hostname": "${POSTGRES_HOST}",
-    "database.port": "5432",
-    "database.user": "${CDC_USER}",
-    "database.password": "${CDC_PASSWORD}",
-    "database.dbname": "ccedb",
-    "database.server.name": "cce",
-    "topic.prefix": "cce.cdc",
-    "plugin.name": "pgoutput",
-    "slot.name": "cce_analytics_slot",
-    "publication.name": "cce_analytics_pub",
-    "table.include.list": "public.protocol_definition,public.protocol_instance,public.step_instance,public.deviation,public.inbound_event,public.intelligence_delivery,public.intelligence_event_log,public.action_definition,public.receiver_adaptor,public.destination_adaptor_mapping",
-    "transforms": "unwrap",
-    "transforms.unwrap.type": "io.debezium.transforms.ExtractNewRecordState",
-    "transforms.unwrap.drop.tombstones": "true",
-    "transforms.unwrap.delete.handling.mode": "rewrite",
-    "key.converter": "org.apache.kafka.connect.json.JsonConverter",
-    "key.converter.schemas.enable": "false",
-    "value.converter": "org.apache.kafka.connect.json.JsonConverter",
-    "value.converter.schemas.enable": "false",
-    "snapshot.mode": "initial",
-    "heartbeat.interval.ms": "10000"
-  }
-}
-```
-
-**ClickHouse sink connector registration:**
-```json
-{
-  "name": "cce-clickhouse-sink",
-  "config": {
-    "connector.class": "com.clickhouse.kafka.connect.ClickHouseSinkConnector",
-    "topics.regex": "cce\\.cdc\\.public\\.(protocol_definition|protocol_instance|step_instance|deviation|inbound_event|intelligence_delivery|intelligence_event_log|action_definition|receiver_adaptor|destination_adaptor_mapping)",
-    "hostname": "clickhouse.cce-data-pipeline.svc.cluster.local",
-    "port": "8123",
-    "database": "cce_analytics",
-    "username": "cce_pipeline",
-    "password": "${CLICKHOUSE_PASSWORD}",
-    "schemas.enable": "false",
-    "batch.size": "10000",
-    "flush.interval.ms": "5000"
-  }
-}
-```
-
----
-
-### 3.4 Apache Superset
-
-**Deployment method:** Helm chart (official)
-
-```bash
-helm repo add superset https://apache.github.io/superset
-helm install superset superset/superset \
-  --namespace cce-data-pipeline \
-  --values superset-values.yaml
-```
-
-**superset-values.yaml:**
-```yaml
-image:
-  repository: apache/superset
-  tag: 4.0.2
-
-replicaCount: 2
-
-supersetNode:
-  connections:
-    db_host: superset-postgresql
-    db_port: 5432
-    db_name: superset
-    db_user: superset
-
-configOverrides:
-  secret: |
-    SECRET_KEY = '${SUPERSET_SECRET_KEY}'
-  
-  enable_oauth: |
-    from flask_appbuilder.security.manager import AUTH_OAUTH
-    AUTH_TYPE = AUTH_OAUTH
-    OAUTH_PROVIDERS = [
-        {
-            'name': 'keycloak',
-            'icon': 'fa-key',
-            'token_key': 'access_token',
-            'remote_app': {
-                'client_id': '${KEYCLOAK_CLIENT_ID}',
-                'client_secret': '${KEYCLOAK_CLIENT_SECRET}',
-                'api_base_url': '${KEYCLOAK_URL}/realms/cce/protocol/openid-connect/',
-                'access_token_url': '${KEYCLOAK_URL}/realms/cce/protocol/openid-connect/token',
-                'authorize_url': '${KEYCLOAK_URL}/realms/cce/protocol/openid-connect/auth',
-                'server_metadata_url': '${KEYCLOAK_URL}/realms/cce/.well-known/openid-configuration',
-                'client_kwargs': {
-                    'scope': 'openid email profile'
-                }
-            }
-        }
-    ]
-  
-  clickhouse_driver: |
-    SQLALCHEMY_CUSTOM_PASSWORD_STORE = None
-    # pip install clickhouse-connect in init container
-
-extraEnvRaw:
-  - name: SUPERSET_LOAD_EXAMPLES
-    value: "no"
-
-init:
-  initContainers:
-    - name: install-clickhouse-driver
-      image: apache/superset:4.0.2
-      command: ['sh', '-c', 'pip install clickhouse-connect']
-
-redis:
-  enabled: true
-
-postgresql:
-  enabled: true
-  auth:
-    postgresPassword: "${SUPERSET_DB_PASSWORD}"
-```
-
-**ClickHouse database connection in Superset:**
-```
-clickhousedb://cce_pipeline:${PASSWORD}@clickhouse.cce-data-pipeline.svc.cluster.local:8123/cce_analytics
-```
-
----
-
-## 4. PostgreSQL Configuration (Source DB)
-
-Enable logical replication for Debezium CDC:
-
+### PostgreSQL Configuration
 ```sql
--- Run on CCE PostgreSQL (requires superuser or replication role)
-
--- 1. Set wal_level (requires restart)
+-- Enable logical replication (requires restart)
 ALTER SYSTEM SET wal_level = 'logical';
 
--- 2. Create dedicated replication user
-CREATE ROLE cce_cdc_user WITH LOGIN REPLICATION PASSWORD '${CDC_PASSWORD}';
-GRANT CONNECT ON DATABASE ccedb TO cce_cdc_user;
-GRANT USAGE ON SCHEMA public TO cce_cdc_user;
-GRANT SELECT ON ALL TABLES IN SCHEMA public TO cce_cdc_user;
-ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT SELECT ON TABLES TO cce_cdc_user;
+-- Create replication slot
+SELECT pg_create_logical_replication_slot('cce_analytics_slot', 'pgoutput');
 
--- 3. Create publication for analytics tables
+-- Create publication for all CDC tables
 CREATE PUBLICATION cce_analytics_pub FOR TABLE
+    inbound_event_log,
     protocol_definition,
     protocol_instance,
     step_instance,
     deviation,
-    inbound_event,
-    intelligence_delivery,
     intelligence_event_log,
+    intelligence_delivery,
     action_definition,
+    compliance_event_log,
     receiver_adaptor,
     destination_adaptor_mapping;
 ```
 
----
+### Secrets
 
-## 5. Environment Variables
-
-### 5.1 Shared
-
-| Variable | Description | Example |
-|----------|-------------|---------|
-| `KAFKA_BOOTSTRAP_SERVERS` | Kafka broker addresses | `kafka-0:9092,kafka-1:9092,kafka-2:9092` |
-| `CLICKHOUSE_HOST` | ClickHouse hostname | `clickhouse.cce-data-pipeline.svc.cluster.local` |
-| `CLICKHOUSE_PORT` | ClickHouse HTTP port | `8123` |
-| `CLICKHOUSE_DB` | Analytics database name | `cce_analytics` |
-| `CLICKHOUSE_USER` | Pipeline user | `cce_pipeline` |
-| `CLICKHOUSE_PASSWORD` | Pipeline password | (from Secret) |
-
-### 5.2 Debezium-specific
-
-| Variable | Description | Example |
-|----------|-------------|---------|
-| `POSTGRES_HOST` | Source PostgreSQL host | `cce-postgresql.cce.svc.cluster.local` |
-| `CDC_USER` | Replication user | `cce_cdc_user` |
-| `CDC_PASSWORD` | Replication password | (from Secret) |
-
-### 5.3 Superset-specific
-
-| Variable | Description | Example |
-|----------|-------------|---------|
-| `SUPERSET_SECRET_KEY` | Flask secret key | (generated, 64+ chars) |
-| `KEYCLOAK_URL` | Keycloak base URL | `https://auth.cce.example.org` |
-| `KEYCLOAK_CLIENT_ID` | OAuth2 client ID | `cce-superset` |
-| `KEYCLOAK_CLIENT_SECRET` | OAuth2 client secret | (from Secret) |
+| Secret | Purpose | Required By |
+|--------|---------|-------------|
+| `CLICKHOUSE_PASSWORD` | ClickHouse pipeline user | kafka-connect, superset |
+| `CDC_PASSWORD` | PostgreSQL replication user | kafka-connect |
+| `SUPERSET_SECRET_KEY` | Session encryption | superset |
+| `SUPERSET_DB_PASSWORD` | Metadata DB | superset |
+| `GRAFANA_PASSWORD` | Admin password | grafana |
 
 ---
 
-## 6. Initialization Steps
+## 3. Infrastructure Components
 
-### 6.1 Bootstrap Order
+### 3.1 ClickHouse
 
-```mermaid
-flowchart TD
-    A["1. Deploy ClickHouse"] --> B["2. Run DDL scripts<br/>(create tables & MVs)"]
-    B --> C["3. Deploy Kafka Connect"]
-    C --> D["4. Register Debezium connector<br/>(initial snapshot)"]
-    D --> E["5. Register ClickHouse sink"]
-    E --> F["6. Deploy Flink cluster"]
-    F --> G["7. Submit Flink jobs"]
-    G --> H["8. Deploy Superset"]
-    H --> I["9. Import dashboard templates"]
-    I --> J["10. Configure Superset database connection"]
-```
+Single-node deployment with `ReplacingMergeTree` tables for CDC.
 
-### 6.2 ClickHouse Schema Initialization
+**Configuration:**
+- Database: `cce_analytics`
+- User: `cce_pipeline`
+- Ports: 8123 (HTTP), 9000 (Native), 9363 (Prometheus metrics)
+- Storage: SSD recommended, ~500 GB for production
 
-```bash
-# Apply DDL scripts
-clickhouse-client --host ${CLICKHOUSE_HOST} \
-  --user ${CLICKHOUSE_USER} \
-  --password ${CLICKHOUSE_PASSWORD} \
-  --database cce_analytics \
-  --multiquery < schema/01-create-tables.sql
+**Resource limits:**
+| Environment | CPU | RAM | Storage |
+|-------------|-----|-----|---------|
+| Development | 4 cores | 4 GB | 50 GB |
+| Production | 8 cores | 32 GB | 500 GB SSD |
 
-clickhouse-client --host ${CLICKHOUSE_HOST} \
-  --user ${CLICKHOUSE_USER} \
-  --password ${CLICKHOUSE_PASSWORD} \
-  --database cce_analytics \
-  --multiquery < schema/02-create-materialized-views.sql
-```
+### 3.2 Kafka Connect
 
----
+Custom image with both connectors:
+- `io.debezium:debezium-connector-postgresql:2.6.1` (source)
+- `com.clickhouse:clickhouse-kafka-connect:0.14.0` (sink)
 
-## 7. Docker Compose (Development)
+**Configuration:**
+- Workers: 1 (dev), 2 (prod, HA)
+- Port: 8083 (REST API)
+- `offset.storage.topic`: `cce-connect-offsets`
+- `config.storage.topic`: `cce-connect-config`
+- `status.storage.topic`: `cce-connect-status`
 
-```yaml
-version: '3.8'
-services:
-  clickhouse:
-    image: clickhouse/clickhouse-server:24.8-alpine
-    ports:
-      - "8123:8123"
-      - "9000:9000"
-    environment:
-      CLICKHOUSE_DB: cce_analytics
-      CLICKHOUSE_USER: cce_pipeline
-      CLICKHOUSE_PASSWORD: dev_password
-    volumes:
-      - clickhouse_data:/var/lib/clickhouse
-      - ./schema:/docker-entrypoint-initdb.d
+### 3.3 Apache Superset
 
-  kafka-connect:
-    image: debezium/connect:2.6
-    ports:
-      - "8083:8083"
-    environment:
-      BOOTSTRAP_SERVERS: ${KAFKA_BOOTSTRAP_SERVERS:-kafka:9092}
-      GROUP_ID: cce-data-pipeline-connect
-      CONFIG_STORAGE_TOPIC: cce.connect.configs
-      OFFSET_STORAGE_TOPIC: cce.connect.offsets
-      STATUS_STORAGE_TOPIC: cce.connect.status
-    depends_on:
-      - clickhouse
+**Dependencies:** Redis (cache), PostgreSQL (metadata DB)
 
-  flink-jobmanager:
-    image: flink:1.19.1-java21
-    command: jobmanager
-    ports:
-      - "8081:8081"
-    environment:
-      FLINK_PROPERTIES: |
-        jobmanager.rpc.address: flink-jobmanager
-        state.backend: rocksdb
-        execution.checkpointing.interval: 60000
+**Configuration:**
+- Port: 8088
+- ClickHouse connection: `clickhousedb://cce_pipeline:***@clickhouse:8123/cce_analytics`
+- OAuth2/OIDC: Keycloak integration for production
 
-  flink-taskmanager:
-    image: flink:1.19.1-java21
-    command: taskmanager
-    environment:
-      FLINK_PROPERTIES: |
-        jobmanager.rpc.address: flink-jobmanager
-        taskmanager.numberOfTaskSlots: 4
-    depends_on:
-      - flink-jobmanager
+### 3.4 Prometheus + Grafana
 
-  superset:
-    image: apache/superset:4.0.2
-    ports:
-      - "8088:8088"
-    environment:
-      SUPERSET_SECRET_KEY: dev-secret-key-change-in-production
-      SQLALCHEMY_DATABASE_URI: sqlite:////app/superset_home/superset.db
-    volumes:
-      - superset_data:/app/superset_home
-    depends_on:
-      - clickhouse
-
-  redis:
-    image: redis:7-alpine
-    ports:
-      - "6379:6379"
-
-volumes:
-  clickhouse_data:
-  superset_data:
-```
-
----
-
-## 8. Health Checks & Monitoring
-
-### 8.1 Health Endpoints
-
-| Component | Health Check | Port |
-|-----------|-------------|------|
-| ClickHouse | `GET /ping` → `Ok.\n` | 8123 |
-| Flink JobManager | `GET /overview` | 8081 |
-| Kafka Connect | `GET /connectors` | 8083 |
-| Superset | `GET /health` | 8088 |
-
-### 8.2 Key Metrics to Monitor
-
-| Metric | Source | Alert Threshold |
-|--------|--------|-----------------|
-| `kafka_consumer_group_lag` | Kafka | > 100,000 (5 min sustained) |
-| `flink_jobmanager_job_uptime` | Flink | < 60s (job restarting) |
-| `flink_taskmanager_Status_JVM_Memory_Heap_Used` | Flink | > 80% |
-| `ClickHouseMetrics_Query` | ClickHouse | > 50 concurrent |
-| `ClickHouseMetrics_MergesRunning` | ClickHouse | > 20 sustained |
-| `ClickHouseAsyncMetrics_ReplicasMaxAbsoluteDelay` | ClickHouse | > 300s |
-
-### 8.3 Prometheus scrape config
-
+**Scrape targets:**
 ```yaml
 scrape_configs:
+  - job_name: 'kafka-connect'
+    static_configs:
+      - targets: ['kafka-connect:8083']
   - job_name: 'clickhouse'
     static_configs:
       - targets: ['clickhouse:9363']
-
-  - job_name: 'flink'
-    static_configs:
-      - targets: ['flink-jobmanager:9249']
-
-  - job_name: 'kafka-connect'
-    static_configs:
-      - targets: ['kafka-connect:9404']
 ```
 
 ---
 
-## 9. Backup & Disaster Recovery
-
-### 9.1 ClickHouse Backup
+## 4. Docker Compose (Development)
 
 ```bash
-# Using clickhouse-backup tool
-# Install: https://github.com/Altinity/clickhouse-backup
+# Start all services
+docker compose up -d
 
-# Daily backup (cron)
-clickhouse-backup create --tables='cce_analytics.*' daily_$(date +%Y%m%d)
+# Check health
+docker compose ps
 
-# Upload to S3/MinIO
-clickhouse-backup upload daily_$(date +%Y%m%d)
-
-# Restore
-clickhouse-backup restore_remote daily_20260101
+# View logs
+docker compose logs -f kafka-connect
 ```
 
-### 9.2 Superset Dashboard Export
+**Services started:** `clickhouse`, `kafka-connect`, `redis`, `superset-db`, `superset`, `prometheus`, `grafana`
 
+**Volumes:** `clickhouse-data`, `superset-db-data`, `prometheus-data`, `grafana-data`
+
+---
+
+## 5. Kubernetes (Production)
+
+### Recommended Namespace Layout
+```
+cce-analytics/
+├── clickhouse (StatefulSet, 1 replica)
+├── kafka-connect (Deployment, 2 replicas)
+├── superset-web (Deployment, 2 replicas)
+├── superset-worker (Deployment, 2 replicas)
+├── superset-db (StatefulSet or managed RDS)
+├── redis (Deployment, 1 replica)
+├── prometheus (StatefulSet, 1 replica)
+└── grafana (Deployment, 1 replica)
+```
+
+### Key K8s Resources
+- **PersistentVolumeClaims:** ClickHouse data (500 GB), Prometheus TSDB (50 GB)
+- **ConfigMaps:** Prometheus config, Grafana dashboards, ClickHouse server config
+- **Secrets:** All passwords, connection strings
+- **Services:** ClusterIP for internal; LoadBalancer/Ingress for Superset, Grafana
+
+---
+
+## 6. Bootstrap Order
+
+```mermaid
+flowchart TD
+    A["1. ClickHouse"] --> B["2. Apply Schema DDL"]
+    B --> C["3. Kafka Connect"]
+    C --> D["4. Register Connectors"]
+    D --> E["5. Verify CDC flowing"]
+    E --> F["6. Redis + Superset DB"]
+    F --> G["7. Superset (init + start)"]
+    G --> H["8. Prometheus + Grafana"]
+```
+
+1. **Start ClickHouse** — Wait for health check (`/ping`)
+2. **Apply schema** — Run `01-create-tables.sql` through `04-create-dictionary.sql`
+3. **Start Kafka Connect** — Wait for REST API (`GET /connectors`)
+4. **Register connectors** — POST source + sink connector configs
+5. **Verify CDC** — Check connector status is `RUNNING`, data flowing
+6. **Start Redis + Superset DB** — Wait for readiness
+7. **Start Superset** — Run DB migrations, create admin, init
+8. **Start Prometheus + Grafana** — Configure dashboards
+
+---
+
+## 7. Connector Setup
+
+### Register Source Connector (Debezium)
 ```bash
-# Export all dashboards as JSON (for version control)
-superset export-dashboards --dashboard-file /backup/dashboards.json
+curl -X POST http://localhost:8083/connectors \
+  -H "Content-Type: application/json" \
+  -d @connectors/cce-cdc-source.json
+```
 
-# Import dashboards
-superset import-dashboards --path /backup/dashboards.json
+### Register Sink Connector (ClickHouse)
+```bash
+curl -X POST http://localhost:8083/connectors \
+  -H "Content-Type: application/json" \
+  -d @connectors/cce-clickhouse-sink.json
+```
+
+### Verify Both Running
+```bash
+curl -s http://localhost:8083/connectors/cce-cdc-source/status | jq '.connector.state'
+# "RUNNING"
+
+curl -s http://localhost:8083/connectors/cce-clickhouse-sink/status | jq '.connector.state'
+# "RUNNING"
+```
+
+### Check Tasks
+```bash
+curl -s http://localhost:8083/connectors/cce-cdc-source/status | jq '.tasks[].state'
+curl -s http://localhost:8083/connectors/cce-clickhouse-sink/status | jq '.tasks[].state'
 ```
 
 ---
 
-## 10. Security Hardening
+## 8. Schema Deployment
 
-| Component | Measure |
-|-----------|---------|
-| ClickHouse | Dedicated user with restricted permissions; TLS for client connections; no default user |
-| Kafka Connect | SASL/SCRAM authentication to Kafka; TLS; dedicated service account |
-| Flink | Pod security context (non-root); network policies restricting egress |
-| Superset | OAuth2 only (no local auth); HTTPS via Ingress; CSP headers |
-| Secrets | All credentials in Kubernetes Secrets (or external vault); never in ConfigMaps |
-| Network | NetworkPolicies: pipeline namespace → Kafka, PostgreSQL only; no public ingress except Superset |
-| CDC user | SELECT + REPLICATION only; no write permissions to source DB |
+```bash
+# Apply in order (all scripts use IF NOT EXISTS — idempotent)
+CH_HOST=${CH_HOST:-localhost}
+CH_USER=${CH_USER:-cce_pipeline}
+CH_PASS=${CLICKHOUSE_PASSWORD:-cce_analytics_dev}
+
+clickhouse-client --host "$CH_HOST" --user "$CH_USER" --password "$CH_PASS" \
+  --database cce_analytics --multiquery < schema/01-create-tables.sql
+
+clickhouse-client --host "$CH_HOST" --user "$CH_USER" --password "$CH_PASS" \
+  --database cce_analytics --multiquery < schema/02-create-materialized-views.sql
+
+clickhouse-client --host "$CH_HOST" --user "$CH_USER" --password "$CH_PASS" \
+  --database cce_analytics --multiquery < schema/03-create-indexes-projections.sql
+
+clickhouse-client --host "$CH_HOST" --user "$CH_USER" --password "$CH_PASS" \
+  --database cce_analytics --multiquery < schema/04-create-dictionary.sql
+```
+
+### Validate Schema
+```bash
+./scripts/validate-clickhouse.sh
+```
 
 ---
 
-## 11. Dead Letter Queue (DLQ) Handling
+## 9. Monitoring & Observability
 
-Each Kafka topic has a corresponding DLQ topic (`.dlq` suffix) for messages that fail processing:
+### 9.1 Grafana Dashboard
 
-| Source Topic | DLQ Topic | Failure Scenarios |
-|--------------|-----------|-------------------|
-| `cce.events.inbound` | `cce.events.inbound.dlq` | Malformed CloudEvents, invalid FHIR payload, schema violations |
-| `cce.intelligence.triggers` | `cce.intelligence.triggers.dlq` | Missing required fields, deserialization errors |
-| `cce.scheduler.triggers` | `cce.scheduler.triggers.dlq` | Invalid UUID, unparseable timestamp |
+The pipeline health dashboard monitors:
+- **CDC Sink Throughput:** Records/sec written to ClickHouse per topic
+- **ClickHouse Insert Rate:** Rows inserted per second
+- **Connector Lag:** Kafka consumer lag for sink connector
+- **Connector Status:** Source and sink connector state
+- **ClickHouse MV Lag:** Time from insert to MV target table update
 
-### 11.1 Monitoring
+### 9.2 Prometheus Metrics
 
-```yaml
-# Prometheus alert rule for DLQ messages
-- alert: DLQMessagesDetected
-  expr: kafka_consumer_group_lag{topic=~".*\\.dlq"} > 0
-  for: 5m
-  labels:
-    severity: warning
-  annotations:
-    summary: "DLQ has {{ $value }} unprocessed messages on {{ $labels.topic }}"
-```
+Key metrics to monitor:
 
-### 11.2 Reprocessing Playbook
+| Metric | Source | Alert Threshold |
+|--------|--------|-----------------|
+| `kafka_connect_connector_status` | Kafka Connect | `!= RUNNING` |
+| `kafka_consumer_lag` | Kafka Connect | `> 10000` |
+| `clickhouse_insert_rows` | ClickHouse | Rate drop > 50% |
+| `clickhouse_merge_tree_parts_count` | ClickHouse | `> 300` per table |
+| `clickhouse_query_duration_ms` | ClickHouse | p99 > 5000ms |
 
-```bash
-# 1. Inspect DLQ messages
-kafka-console-consumer --bootstrap-server ${KAFKA_BOOTSTRAP_SERVERS} \
-  --topic cce.events.inbound.dlq --from-beginning --max-messages 10
+### 9.3 Alerts
 
-# 2. Identify root cause (schema change, bug in enrichment logic, etc.)
+Configured in `infra/grafana/provisioning/alerting/alerts.yaml`:
 
-# 3. After fixing the root cause, replay DLQ back to source topic:
-kafka-console-consumer --bootstrap-server ${KAFKA_BOOTSTRAP_SERVERS} \
-  --topic cce.events.inbound.dlq --from-beginning | \
-kafka-console-producer --bootstrap-server ${KAFKA_BOOTSTRAP_SERVERS} \
-  --topic cce.events.inbound
-
-# 4. Verify DLQ is drained
-kafka-consumer-groups --bootstrap-server ${KAFKA_BOOTSTRAP_SERVERS} \
-  --describe --group cce-data-pipeline-flink | grep dlq
-```
-
-### 11.3 DLQ Retention
-
-DLQ topics have 30-day retention (vs 7-day for source topics) to allow investigation time.
+| Alert | Condition | Severity |
+|-------|-----------|----------|
+| CDC Sink Connector Down | Status != RUNNING for 2min | Critical |
+| ClickHouse Insert Stall | Zero inserts for 5min | Warning |
+| High Consumer Lag | Lag > 10000 for 5min | Warning |
+| ClickHouse Disk Usage | > 80% | Warning |
 
 ---
 
-## 12. Backfill & Replay Runbook
+## 10. Health Checks
 
-### 12.1 Flink Job State Loss (checkpoint corruption, redeployment without savepoint)
-
+### Automated
 ```bash
-# 1. Identify affected time range
-#    Check last successful checkpoint timestamp in Flink UI
+# Full validation
+./scripts/validate-clickhouse.sh
 
-# 2. Determine which ClickHouse tables need backfill
-#    - events_fact (Flink: event-enrichment)
-#    - event_volume_hourly (Flink: event-volume-aggregator)
-#    - intelligence_events (Flink: intelligence-tracker)
-#    - step_transitions (Flink: scheduler-tracker)
+# Data quality
+./scripts/data-quality-checks.sh
 
-# 3. Delete affected data in ClickHouse (by time range)
-clickhouse-client --query "
-  ALTER TABLE events_fact DELETE
-  WHERE processed_at >= '2026-05-01 00:00:00'
-    AND processed_at <= '2026-05-02 00:00:00'
-"
-
-# 4. Reset Flink consumer group to target timestamp
-kafka-consumer-groups --bootstrap-server ${KAFKA_BOOTSTRAP_SERVERS} \
-  --group cce-data-pipeline-flink \
-  --topic cce.events.inbound \
-  --reset-offsets --to-datetime 2026-05-01T00:00:00.000 \
-  --execute
-
-# 5. Restart Flink job (it will replay from the reset offset)
-kubectl -n cce-data-pipeline rollout restart deployment/flink-taskmanager
+# E2E test
+./tests/e2e/run-e2e-tests.sh
 ```
 
-### 12.2 CDC Full Re-sync (replication slot lost, extended outage > 7 days)
+### Manual Quick Checks
+
+| Check | Command | Expected |
+|-------|---------|----------|
+| ClickHouse alive | `curl -s http://localhost:8123/ping` | `Ok.` |
+| Tables exist | `clickhouse-client -q "SELECT count() FROM system.tables WHERE database='cce_analytics'"` | `>= 11` |
+| MVs exist | `clickhouse-client -q "SELECT count() FROM system.tables WHERE database='cce_analytics' AND engine LIKE '%View%'"` | `11` |
+| Connectors | `curl -s http://localhost:8083/connectors` | `["cce-cdc-source","cce-clickhouse-sink"]` |
+| Superset | `curl -s http://localhost:8088/health` | `OK` |
+| Grafana | `curl -s http://localhost:3000/api/health` | `{"database":"ok"}` |
+
+---
+
+## 11. Dead Letter Queue (DLQ)
+
+The ClickHouse sink connector writes unprocessable records to a DLQ topic.
+
+**DLQ topic:** `cce-clickhouse-sink-dlq`
+
+### Monitor DLQ
+```bash
+# Check DLQ message count
+kafka-console-consumer.sh --bootstrap-server $KAFKA_BOOTSTRAP \
+  --topic cce-clickhouse-sink-dlq --from-beginning --max-messages 5
+```
+
+### Replay DLQ
+```bash
+./scripts/replay-dlq.sh cce-clickhouse-sink-dlq $KAFKA_BOOTSTRAP
+```
+
+### Common DLQ Causes
+| Cause | Fix |
+|-------|-----|
+| Schema mismatch | Update ClickHouse DDL to match new source columns |
+| Type conversion error | Check Debezium `transforms` configuration |
+| ClickHouse full | Expand storage, run TTL cleanup |
+
+---
+
+## 12. Backfill & Replay
+
+### Full Re-snapshot (CDC)
+If ClickHouse data is lost or needs full refresh:
 
 ```bash
-# 1. Drop the old replication slot (if still exists)
-psql -h ${POSTGRES_HOST} -U ${CDC_USER} -d ccedb -c \
-  "SELECT pg_drop_replication_slot('cce_analytics_slot');"
+# 1. Stop sink connector
+curl -X PUT http://localhost:8083/connectors/cce-clickhouse-sink/pause
 
-# 2. Truncate affected ClickHouse tables
-clickhouse-client --query "TRUNCATE TABLE protocol_instances"
-clickhouse-client --query "TRUNCATE TABLE step_instances"
-clickhouse-client --query "TRUNCATE TABLE deviations"
-# ... repeat for all CDC tables
+# 2. Truncate ClickHouse tables
+clickhouse-client -q "TRUNCATE TABLE cce_analytics.inbound_event_logs"
+# (repeat for other tables)
 
-# 3. Delete and recreate the Debezium connector (triggers fresh snapshot)
-curl -X DELETE http://kafka-connect:8083/connectors/cce-cdc-source
-curl -X POST http://kafka-connect:8083/connectors \
-  -H 'Content-Type: application/json' \
+# 3. Delete and recreate source connector (triggers snapshot)
+curl -X DELETE http://localhost:8083/connectors/cce-cdc-source
+curl -X POST http://localhost:8083/connectors \
+  -H "Content-Type: application/json" \
   -d @connectors/cce-cdc-source.json
 
-# 4. Monitor snapshot progress
-curl http://kafka-connect:8083/connectors/cce-cdc-source/status | jq .
+# 4. Resume sink connector
+curl -X PUT http://localhost:8083/connectors/cce-clickhouse-sink/resume
+
+# 5. Monitor progress
+watch -n 5 'curl -s http://localhost:8083/connectors/cce-cdc-source/status | jq ".tasks[].state"'
 ```
 
-### 12.3 Partial Table Backfill (single table corruption)
-
+### Partial Replay (Kafka topic)
+If only specific tables need refresh, reset the sink consumer offset:
 ```bash
-# 1. Truncate only the affected table
-clickhouse-client --query "TRUNCATE TABLE intelligence_deliveries"
+# Stop sink
+curl -X PUT http://localhost:8083/connectors/cce-clickhouse-sink/pause
 
-# 2. Reset only that table's CDC offset
-curl -X PUT http://kafka-connect:8083/connectors/cce-cdc-source/offsets/reset \
-  -H 'Content-Type: application/json'
+# Reset offset for specific topic
+kafka-consumer-groups.sh --bootstrap-server $KAFKA_BOOTSTRAP \
+  --group connect-cce-clickhouse-sink \
+  --topic cce.cdc.compliance_service.public.protocol_instance \
+  --reset-offsets --to-earliest --execute
 
-# 3. Alternative: use Debezium signal table for ad-hoc snapshot
-psql -h ${POSTGRES_HOST} -U ${CDC_USER} -d ccedb -c \
-  "INSERT INTO debezium_signal (id, type, data)
-   VALUES ('snapshot-intel-delivery', 'execute-snapshot',
-           '{\"data-collections\": [\"public.intelligence_delivery\"]}');"
+# Resume sink
+curl -X PUT http://localhost:8083/connectors/cce-clickhouse-sink/resume
 ```
 
 ---
 
-## 13. Schema Evolution Strategy
+## 13. Troubleshooting
 
-### 13.1 FHIR Payload Changes
+### Connector Not Starting
+```bash
+# Check connector status
+curl -s http://localhost:8083/connectors/cce-cdc-source/status | jq '.'
 
-The pipeline is resilient to FHIR R4 payload evolution by design:
+# Check worker logs
+docker compose logs kafka-connect | grep ERROR
 
-| Change Type | Impact | Handling |
-|-------------|--------|----------|
-| **New field added** to FHIR resource | No impact — `raw_payload` preserves full data | Extract new field with `ALTER TABLE ADD COLUMN` + backfill |
-| **New resource type** | Auto-captured (events_fact uses `LowCardinality(String)`) | Update dashboards to include new type in filters |
-| **Field renamed** | Flink extraction breaks for renamed field | Update Flink job's JSON_VALUE path; redeploy with savepoint |
-| **Field removed** | Extracted column gets NULLs going forward | Acceptable; no action unless field was critical |
-
-### 13.2 Adding New Extracted Fields
-
-```sql
--- 1. Add column to ClickHouse (instant, no rewrite)
-ALTER TABLE events_fact ADD COLUMN encounter_class LowCardinality(Nullable(String))
-  AFTER primary_code_display;
-
--- 2. Update Flink job to extract the new field (savepoint-based redeploy)
---    Add to INSERT INTO: JSON_VALUE(`data`, '$.class.code') AS encounter_class
-
--- 3. Backfill historical data (optional, for full coverage)
-ALTER TABLE events_fact UPDATE
-    encounter_class = JSONExtractString(raw_payload, 'class', 'code')
-WHERE encounter_class IS NULL;
+# Common fixes:
+# - PostgreSQL: verify wal_level=logical, replication slot exists
+# - ClickHouse: verify database/user exists, network connectivity
 ```
 
-### 13.3 CDC Schema Changes (PostgreSQL ALTER TABLE)
+### Data Not Appearing in ClickHouse
+```bash
+# Check connector lag
+curl -s http://localhost:8083/connectors/cce-clickhouse-sink/status | jq '.tasks[]'
 
-Debezium handles most DDL changes automatically:
+# Verify data in Kafka topic
+kafka-console-consumer.sh --bootstrap-server $KAFKA_BOOTSTRAP \
+  --topic cce.cdc.compliance_service.public.protocol_instance \
+  --from-beginning --max-messages 1
 
-| DDL Change | Debezium Behavior | ClickHouse Action Required |
-|------------|-------------------|---------------------------|
-| `ADD COLUMN` | New field appears in CDC events | `ALTER TABLE ADD COLUMN` on ClickHouse table |
-| `DROP COLUMN` | Field disappears from CDC events | Column gets NULLs; optionally `DROP COLUMN` later |
-| `ALTER TYPE` (compatible) | Auto-handled (e.g., VARCHAR length increase) | None |
-| `ALTER TYPE` (incompatible) | May require connector restart | `ALTER TABLE MODIFY COLUMN` or migrate |
-| `RENAME COLUMN` | Treated as DROP + ADD | Manual mapping in sink connector SMT |
-
----
-
-## 14. Data Validation & Quality Checks
-
-### 14.1 Flink-Side Validation (Event Enrichment Job)
-
-```java
-// Validation rules applied before writing to ClickHouse
-// Events failing validation are routed to DLQ
-
-ValidationRules:
-  - patient_id (subject) must not be null or empty
-  - event_time must not be in the future (> now + 5 minutes)
-  - event_time must not be older than 2 years
-  - resource_type must be a valid FHIR R4 resource type
-  - source must not be null
+# Check ClickHouse insert errors
+clickhouse-client -q "SELECT * FROM system.query_log WHERE type='ExceptionWhileProcessing' ORDER BY event_time DESC LIMIT 5"
 ```
 
-### 14.2 ClickHouse-Side Quality Metrics
+### Materialized Views Not Populating
+```bash
+# MVs trigger on INSERT to source table — check source table has data
+clickhouse-client -q "SELECT count() FROM cce_analytics.inbound_event_logs"
 
-```sql
--- Run daily as a scheduled Superset alert or Grafana query
--- Detects anomalies in data completeness
+# Check MV target table
+clickhouse-client -q "SELECT count() FROM cce_analytics.mv_event_volume_hourly"
 
-SELECT
-    toStartOfHour(processed_at) AS hour,
-    count() AS events_received,
-    countIf(patient_id = '') AS missing_patient_id,
-    countIf(facility_id IS NULL OR facility_id = '') AS missing_facility,
-    countIf(resource_type = '') AS missing_resource_type,
-    countIf(processed_at - event_time > 300) AS late_events_over_5min,
-    round(missing_patient_id / events_received * 100, 2) AS pct_missing_patient
-FROM events_fact
-WHERE processed_at >= now() - INTERVAL 24 HOUR
-GROUP BY hour
-HAVING missing_patient_id > 0 OR missing_facility > events_received * 0.1
-ORDER BY hour;
+# If source has data but MV doesn't, the MV may have been created AFTER data was inserted
+# Solution: recreate MV or backfill manually
 ```
 
-### 14.3 Cross-Source Consistency Check
+### High ClickHouse Merge Pressure
+```bash
+# Check parts count
+clickhouse-client -q "
+  SELECT table, count() as parts, sum(rows) as total_rows
+  FROM system.parts WHERE database='cce_analytics' AND active
+  GROUP BY table ORDER BY parts DESC"
 
-```sql
--- Compare CDC count vs Kafka stream count (should be close)
-SELECT
-    'inbound_events (CDC)' AS source,
-    count() AS count_24h
-FROM inbound_events
-WHERE received_at >= now() - INTERVAL 24 HOUR
-
-UNION ALL
-
-SELECT
-    'events_fact (Kafka stream)' AS source,
-    count() AS count_24h
-FROM events_fact
-WHERE event_time >= now() - INTERVAL 24 HOUR;
-
--- Delta > 5% indicates a pipeline issue
+# Force optimize if needed
+clickhouse-client -q "OPTIMIZE TABLE cce_analytics.inbound_event_logs FINAL"
 ```
