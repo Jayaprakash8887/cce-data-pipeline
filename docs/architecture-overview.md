@@ -18,12 +18,12 @@ The **CCE Data Pipeline** replaces the custom `cce-insights-service` and `cce-in
 
 ```mermaid
 graph TB
-    subgraph Existing["CCE Platform (Existing)"]
+    subgraph Existing["CCE Platform"]
         COLLECTOR["CCE Collector Service"]
         COMPLIANCE["CCE Compliance Service"]
         SCHEDULER["CCE Scheduler Service"]
         INTELLIGENCE["CCE Intelligence Service"]
-        PG["PostgreSQL 16<br/>(ccedb — shared)"]
+        PG["PostgreSQL 16<br/>(ccedb)"]
     end
 
     subgraph Pipeline["CCE Data Pipeline"]
