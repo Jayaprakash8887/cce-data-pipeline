@@ -35,8 +35,8 @@ alerts:
     description: "No events received in 30 minutes"
     sql: |
       SELECT count() AS event_count
-      FROM events_fact
-      WHERE event_time >= now() - INTERVAL 30 MINUTE
+      FROM inbound_event_logs
+      WHERE received_at >= now() - INTERVAL 30 MINUTE
     threshold: 1
     condition: "< (less than)"
     frequency: "*/5 * * * *"
@@ -48,7 +48,7 @@ alerts:
     description: "Adaptor success rate below 80% in last hour"
     sql: |
       SELECT round(
-        sum(delivered) / nullIf(sum(total_deliveries), 0) * 100, 1
+        countIfMerge(delivered) / nullIf(countMerge(total_deliveries), 0) * 100, 1
       ) AS success_rate
       FROM mv_delivery_performance_hourly
       WHERE hour >= now() - INTERVAL 1 HOUR

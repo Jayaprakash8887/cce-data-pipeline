@@ -2,12 +2,13 @@
 
 ## 1. Purpose
 
-The **CCE Data Pipeline** replaces the custom `cce-insights-service` and `cce-insights-ui` with an open-source analytics stack. It consumes events from the existing CCE Kafka topics, processes and materializes analytics views in a columnar OLAP database, and exposes interactive dashboards via open-source visualization tools.
+The **CCE Data Pipeline** replaces the custom `cce-insights-service` and `cce-insights-ui` with an open-source analytics stack. It captures committed data from CCE PostgreSQL databases via Change Data Capture (CDC), materializes analytics views in a columnar OLAP database, and exposes interactive dashboards via open-source visualization tools.
 
 **Design goals:**
 - Eliminate custom analytics code — leverage battle-tested open-source components
 - Handle **600k+ events/day** (≈7 events/second average, burst peaks up to 50 eps)
-- Provide near-real-time insights (< 60-second latency from event to dashboard)
+- Provide near-real-time insights (< 60-second latency from DB commit to dashboard)
+- Analytics based exclusively on **committed data** — no in-flight Kafka consumption that could reflect rejected/failed events
 - Enable self-service exploration by operations teams without engineering involvement
 - Maintain separation of concerns — the pipeline is read-only and never writes back to CCE operational databases
 
@@ -17,17 +18,15 @@ The **CCE Data Pipeline** replaces the custom `cce-insights-service` and `cce-in
 
 ```mermaid
 graph TB
-    subgraph CCE Platform (Existing)
+    subgraph Existing["CCE Platform (Existing)"]
         COLLECTOR["CCE Collector Service"]
         COMPLIANCE["CCE Compliance Service"]
-        SCHEDULER["CCE Scheduler Service"]
-        INTELLIGENCE["CCE Intelligence Service"]
-        KAFKA["Apache Kafka<br/>(existing cluster)"]
+        PG_COLLECTOR["PostgreSQL<br/>(collector DB)"]
+        PG_COMPLIANCE["PostgreSQL<br/>(compliance DB)"]
     end
 
-    subgraph CCE Data Pipeline (New)
-        CONNECT["Kafka Connect<br/>(JDBC Source Connectors)"]
-        FLINK["Apache Flink<br/>(Stream Processing)"]
+    subgraph Pipeline["CCE Data Pipeline"]
+        DEBEZIUM["Debezium CDC<br/>(Kafka Connect)"]
         CLICKHOUSE["ClickHouse<br/>(OLAP Analytics Store)"]
         SUPERSET["Apache Superset<br/>(Dashboards & Visualization)"]
     end
@@ -38,13 +37,12 @@ graph TB
         ADMIN["System Administrators"]
     end
 
-    COLLECTOR -->|"cce.events.inbound"| KAFKA
-    COMPLIANCE -->|"cce.intelligence.triggers"| KAFKA
-    SCHEDULER -->|"cce.scheduler.triggers"| KAFKA
+    COLLECTOR --> PG_COLLECTOR
+    COMPLIANCE --> PG_COMPLIANCE
 
-    KAFKA -->|"Stream events"| FLINK
-    CONNECT -->|"CDC from PostgreSQL"| CLICKHOUSE
-    FLINK -->|"Processed & aggregated"| CLICKHOUSE
+    PG_COLLECTOR -->|"CDC (WAL)"| DEBEZIUM
+    PG_COMPLIANCE -->|"CDC (WAL)"| DEBEZIUM
+    DEBEZIUM -->|"Kafka → ClickHouse Sink"| CLICKHOUSE
     CLICKHOUSE --> SUPERSET
 
     SUPERSET --> OPS
@@ -55,8 +53,8 @@ graph TB
     classDef pipeline fill:#4A90D9,stroke:#2C5F8A,color:white
     classDef users fill:#27AE60,stroke:#1E8449,color:white
 
-    class COLLECTOR,COMPLIANCE,SCHEDULER,INTELLIGENCE,KAFKA existing
-    class CONNECT,FLINK,CLICKHOUSE,SUPERSET pipeline
+    class COLLECTOR,COMPLIANCE,PG_COLLECTOR,PG_COMPLIANCE existing
+    class DEBEZIUM,CLICKHOUSE,SUPERSET pipeline
     class OPS,CLINICAL,ADMIN users
 ```
 
@@ -69,10 +67,10 @@ graph TB
 | # | Principle | Rationale |
 |---|-----------|-----------|
 | 1 | **Open-source only** | No vendor lock-in; community support; cost-effective |
-| 2 | **Event-driven** | Leverage existing Kafka infrastructure; no polling of operational DBs for hot-path data |
-| 3 | **Separation of compute and storage** | Scale processing (Flink) independently from analytics queries (ClickHouse) |
-| 4 | **Schema-on-read flexibility** | ClickHouse's semi-structured support handles evolving FHIR payloads without migrations |
-| 5 | **Immutable append-only** | All analytics data is append-only (event sourcing); no updates to source data |
+| 2 | **CDC-only (committed data)** | Analytics based solely on data committed to PostgreSQL — eliminates discrepancies from in-flight Kafka events that may be rejected or reprocessed |
+| 3 | **No custom stream processing** | ClickHouse MATERIALIZED columns + Materialized Views replace Flink — fewer moving parts, less operational burden |
+| 4 | **Schema-on-read flexibility** | ClickHouse's JSON functions handle evolving FHIR payloads without migrations; `raw_payload` preserved for future extraction |
+| 5 | **Immutable append-only** | All analytics data captured via CDC; ReplacingMergeTree handles updates idempotently |
 | 6 | **Self-service analytics** | Operations teams build their own dashboards; no engineering dependency |
 | 7 | **Graceful degradation** | Pipeline failures do not impact CCE operational services |
 
@@ -80,51 +78,35 @@ graph TB
 
 ## 4. Component Overview
 
-### 4.1 Event Ingestion Layer
+### 4.1 CDC Layer (Debezium + ClickHouse Kafka Connect Sink)
 
-**Apache Kafka** (existing) — the event backbone. No changes required to existing CCE services.
+**Debezium 2.6.1** captures PostgreSQL WAL changes and publishes them to Kafka topics. **ClickHouse Kafka Connect Sink 0.14.0** consumes those topics and writes directly to ClickHouse tables using `ReplacingMergeTree` for idempotent upserts.
 
-| Topic | Source | Content |
-|-------|--------|--------|
-| `cce.events.inbound` | Collector Service | All validated clinical events (CloudEvents + FHIR R4) |
-| `cce.scheduler.triggers` | Scheduler Service | Step state transitions (PENDING→DUE, DUE→OVERDUE, OVERDUE→MISSED) |
-| `cce.intelligence.triggers` | Compliance Service | Intelligence action triggers (deviations, completions, escalations) |
+| Source Database | Source Table | ClickHouse Table | Purpose |
+|-----------------|--------------|------------------|---------|
+| cce-collector-service | `inbound_event_log` | `inbound_event_logs` | Full CloudEvent audit trail (raw_payload contains FHIR) |
+| cce-compliance-service | `protocol_definition` | `protocol_definitions` | Protocol metadata (FHIR PlanDefinition) |
+| cce-compliance-service | `protocol_instance` | `protocol_instances` | Patient enrollments, compliance status |
+| cce-compliance-service | `step_instance` | `step_instances` | Step states, due dates, completion |
+| cce-compliance-service | `deviation` | `deviations` | OVERDUE, MISSED, ORDER_VIOLATION records |
+| cce-compliance-service | `intelligence_event_log` | `intelligence_event_logs` | Intelligence trigger audit trail |
+| cce-compliance-service | `action_definition` | `action_definitions` | Notification/escalation action templates |
+| cce-compliance-service | `compliance_event_log` | `compliance_event_logs` | Compliance processing outcomes |
+| cce-collector-service | `receiver_adaptor` | `receiver_adaptors` | FHIR endpoint adaptor registry |
+| cce-collector-service | `destination_adaptor_mapping` | `destination_adaptor_mappings` | Destination-to-adaptor routing |
+| cce-compliance-service | `intelligence_delivery` | `intelligence_deliveries` | Intelligence action delivery outcomes |
 
-**Kafka Connect** (Debezium CDC) — log-based change data capture from PostgreSQL for dimensional data that isn't fully represented in Kafka events:
+### 4.2 Analytics Storage Layer
 
-| Connector | Source Table | Purpose |
-|-----------|--------------|---------|
-| `cce-protocol-definitions` | `protocol_definition` | Protocol metadata (name, version, canonical URL) |
-| `cce-protocol-instances` | `protocol_instance` | Patient enrollments, status, compliance tracking |
-| `cce-step-instances` | `step_instance` | Step states, dates, completion status |
-| `cce-deviations` | `deviation` | Deviation records with detection timestamps |
-| `cce-inbound-events` | `inbound_event` | Ingestion audit (acceptance/rejection tracking) |
-| `cce-intelligence-deliveries` | `intelligence_delivery` | Intelligence action delivery outcomes |
-| `cce-intelligence-event-log` | `intelligence_event_log` | Intelligence trigger audit trail |
-| `cce-action-definitions` | `action_definition` | Notification/escalation action templates |
-| `cce-receiver-adaptors` | `receiver_adaptor` | FHIR endpoint adaptor registry |
-| `cce-destination-mappings` | `destination_adaptor_mapping` | Destination-to-adaptor routing |
+**ClickHouse 24.8** — columnar OLAP database:
 
-### 4.2 Stream Processing Layer
-
-**Apache Flink** — stateful stream processing for real-time transformations and pre-aggregations:
-
-- **Event enrichment** — flatten CloudEvents envelope, extract FHIR resource fields
-- **Real-time counters** — event volume per facility/source/resource type (tumbling windows)
-- **Compliance metrics** — adherence rate calculations, deviation detection rates
-- **Late event handling** — watermarks with allowed lateness for out-of-order events
-
-### 4.3 Analytics Storage Layer
-
-**ClickHouse** — columnar OLAP database optimized for analytical queries:
-
+- **MATERIALIZED columns** on `inbound_event_logs` extract fields from `raw_payload` at insert time (`facility_id`, `event_type`, `patient_id`, `practitioner_ref`, `resource_type`) — replaces Flink enrichment
+- **Materialized Views** pre-aggregate metrics (event volume, practitioner activity, facility summary, compliance, intelligence) — replaces Flink tumbling windows
 - Sub-second query response on 100M+ rows
-- Native support for time-series aggregations (`toStartOfDay`, `toStartOfWeek`)
-- Materialized views for pre-computed dashboards
 - TTL-based data lifecycle management
 - Low storage footprint via columnar compression (10-40x vs row stores)
 
-### 4.4 Visualization Layer
+### 4.3 Visualization Layer
 
 **Apache Superset** — open-source BI and dashboard platform:
 
@@ -138,22 +120,19 @@ graph TB
 
 ## 5. Data Domains
 
-The pipeline serves the same analytical domains as the previous insights-service, plus additional granular insights:
-
-| Domain | Key Metrics | Primary Data Source |
-|--------|-------------|---------------------|
-| **Compliance Summary** | Adherence rate, on-track/at-risk/non-compliant counts | protocol_instance + step_instance (CDC) |
-| **Deviation Analytics** | Overdue/missed counts, trends, resolution rate, time-in-deviation | deviation (CDC) + intelligence triggers (Kafka) |
-| **Event Volume** | Events by resource type, facility, source, practitioner | cce.events.inbound (Kafka) |
-| **Protocol Analytics** | Step completion funnel, timeliness, SLA metrics, version comparison | step_instance + protocol_instance (CDC) |
-| **Facility Ranking** | Compliance rate, deviation count, event volume per facility | Composite (all sources) |
-| **Patient Risk** | At-risk hotspots, repeat deviations, patient timeline | protocol_instance + deviation (CDC) |
-| **Ingestion Quality** | Acceptance rate, rejection by resource type, source quality | inbound_event (CDC) |
-| **Receiver-Adaptor Performance** | Success rate, latency, errors per adaptor/source | intelligence_delivery (CDC from Intelligence Service) |
-| **Intelligence & Triggers** | Trigger volume by severity, action type, destination | cce.intelligence.triggers (Kafka) |
-| **Practitioner Activity** | Events per practitioner, patient coverage, deviation correlation | events_fact (Flink) |
-| **Event Correlation** | End-to-end event lifecycle tracing (inbound → process → deliver) | Composite (correlation_id join) |
-| **Pipeline Health** | Processing latency, throughput, error rates | Kafka consumer lag + Flink metrics |
+| Domain | Key Metrics | Data Source |
+|--------|-------------|-------------|
+| **Event Volume** | Events by resource type, facility, source, practitioner | `inbound_event_logs` → `mv_event_volume_hourly/daily` |
+| **Facility Ranking** | Event volume, unique patients, unique practitioners per facility | `inbound_event_logs` → `mv_facility_summary` |
+| **Practitioner Activity** | Events per practitioner, patient coverage, resource types | `inbound_event_logs` → `mv_practitioner_summary` |
+| **Compliance Summary** | Adherence rate, on-track/at-risk/non-compliant counts | `protocol_instances` → `mv_compliance_summary` |
+| **Deviation Analytics** | Overdue/missed counts, trends, by protocol | `deviations` → `mv_deviation_trends`, `mv_deviation_by_protocol` |
+| **Ingestion Quality** | Acceptance rate, rejection reasons, source quality | `inbound_event_logs` → `mv_ingestion_quality` |
+| **Intelligence & Triggers** | Trigger volume by action type, destination, reason | `intelligence_event_logs` → `mv_intelligence_summary` |
+| **Delivery Performance** | Success rate, latency, errors per adaptor | `intelligence_deliveries` → `mv_delivery_performance_hourly` |
+| **Step/Scheduler** | Step states, completions, protocol progress | `step_instances` → `mv_step_states_daily` |
+| **Event Correlation** | End-to-end tracing via correlation_id | JOIN across tables on `correlation_id` |
+| **Pipeline Health** | CDC lag, connector status | Kafka Connect metrics + Grafana |
 
 ---
 
@@ -161,18 +140,19 @@ The pipeline serves the same analytical domains as the previous insights-service
 
 ```mermaid
 flowchart LR
-    subgraph Sources
-        K["Kafka Topics"]
-        PG["PostgreSQL<br/>(CCE operational DB)"]
+    subgraph Sources["CCE PostgreSQL Databases"]
+        PG1["collector-service DB"]
+        PG2["compliance-service DB"]
     end
 
-    subgraph Processing
-        F["Apache Flink<br/>(stream jobs)"]
-        KC["Kafka Connect<br/>(CDC)"]
+    subgraph CDC["CDC Pipeline"]
+        DEB["Debezium<br/>(WAL capture)"]
+        KF["Kafka<br/>(CDC topics)"]
+        SINK["ClickHouse<br/>Kafka Connect Sink"]
     end
 
-    subgraph Storage
-        CH["ClickHouse<br/>(analytics tables<br/>+ materialized views)"]
+    subgraph Analytics["Analytics Layer"]
+        CH["ClickHouse<br/>(tables + MVs)"]
     end
 
     subgraph Presentation
@@ -180,10 +160,11 @@ flowchart LR
         G["Grafana<br/>(operational monitoring)"]
     end
 
-    K --> F
-    F --> CH
-    PG --> KC
-    KC --> CH
+    PG1 --> DEB
+    PG2 --> DEB
+    DEB --> KF
+    KF --> SINK
+    SINK --> CH
     CH --> S
     CH --> G
 ```
@@ -219,11 +200,9 @@ flowchart LR
 
 | Component | Instances | CPU | RAM | Storage |
 |-----------|-----------|-----|-----|---------|
-| Apache Flink (JobManager) | 1 | 2 cores | 4 GB | — |
-| Apache Flink (TaskManager) | 2 | 4 cores | 8 GB | — |
 | ClickHouse | 1 (single node) | 8 cores | 32 GB | 500 GB SSD |
+| Kafka Connect (Debezium + Sink) | 2 (distributed) | 2 cores | 4 GB | — |
 | Apache Superset | 2 (HA) | 4 cores | 8 GB | — |
-| Kafka Connect | 2 (distributed) | 2 cores | 4 GB | — |
 
 > **Scale-out path:** ClickHouse supports sharding + replication for horizontal scaling. At 600k events/day, a single node is more than sufficient. Scale to a cluster when daily volume exceeds 10M events.
 
@@ -237,10 +216,12 @@ flowchart LR
 | **Query layer** | Custom JPA repositories, hand-tuned SQL | ClickHouse materialized views + Superset SQL |
 | **Caching** | Custom 3-tier Caffeine cache | ClickHouse native query cache + materialized views |
 | **Dashboard** | Custom React application | Apache Superset (no-code dashboard builder) |
-| **Deployment** | 2 additional microservices (JVM) | Infrastructure components (Flink, ClickHouse, Superset) |
+| **Stream processing** | N/A | None needed — ClickHouse MATERIALIZED columns + MVs |
+| **Deployment** | 2 additional microservices (JVM) | Infrastructure components only (ClickHouse, Kafka Connect, Superset) |
 | **Maintenance** | Application code maintenance, dependency upgrades | Infrastructure operations only |
+| **Data consistency** | Direct DB queries (consistent) | CDC from committed data only (consistent) |
 | **Flexibility** | Developer-dependent for new metrics | Self-service (operations team builds dashboards) |
-| **Latency** | Real-time (direct DB query + 15-60min cache) | Near-real-time (< 60s event-to-dashboard) |
+| **Latency** | Real-time (direct DB query + 15-60min cache) | Near-real-time (< 60s DB commit-to-dashboard) |
 | **Scale ceiling** | PostgreSQL query load on operational DB | Dedicated OLAP engine; no operational DB impact |
 
 ---
@@ -263,11 +244,11 @@ flowchart LR
 
 | Failure | Impact | Recovery |
 |---------|--------|----------|
-| Flink job crash | Event processing paused; dashboards show stale data | Auto-restart from last Kafka checkpoint; no data loss |
-| ClickHouse down | Dashboards unavailable | Flink buffers in Kafka (retention = 7 days); replay on recovery |
-| Kafka Connect failure | CDC tables go stale | Connector auto-restart; snapshot recovery on extended outage |
+| ClickHouse down | Dashboards unavailable; CDC buffered in Kafka | Kafka retains CDC events (retention = 7 days); replay on recovery |
+| Kafka Connect (Debezium) failure | CDC tables go stale | Connector auto-restart; snapshot recovery on extended outage |
+| Kafka Connect (Sink) failure | New data not landing in ClickHouse | Auto-restart; replay from Kafka offsets |
 | Superset down | Dashboards unavailable | No data impact; restart and reconnect |
-| Kafka cluster down | All CCE services affected (existing risk) | Flink pauses; resumes on recovery |
+| Kafka cluster down | All CCE services affected (existing risk) | CDC pauses; resumes on recovery |
 
 **Key invariant:** The data pipeline is a **read-only observer**. Its failure never impacts CCE operational services (Collector, Compliance, Scheduler, Intelligence).
 
@@ -277,13 +258,13 @@ flowchart LR
 
 | Phase | Duration | Activities |
 |-------|----------|------------|
-| **Phase 1: Foundation** | 2 weeks | Deploy ClickHouse, Kafka Connect CDC, basic tables |
-| **Phase 2: Stream Processing** | 2 weeks | Deploy Flink jobs for event enrichment and aggregation |
-| **Phase 3: Dashboards** | 2 weeks | Configure Superset, build core dashboards (compliance, deviations, events) |
+| **Phase 1: Foundation** | 2 weeks | Deploy ClickHouse, Kafka Connect (Debezium + Sink), CDC tables |
+| **Phase 2: Materialized Views** | 1 week | Configure MVs for all analytics domains (volume, facility, practitioner, compliance) |
+| **Phase 3: Dashboards** | 2 weeks | Configure Superset, build core dashboards |
 | **Phase 4: Validation** | 1 week | Run parallel with existing insights-service; validate data accuracy |
 | **Phase 5: Cutover** | 1 week | Route users to Superset; decommission insights-service and insights-ui |
 
-**Total estimated timeline:** 8 weeks
+**Total estimated timeline:** 7 weeks
 
 ---
 
@@ -293,13 +274,13 @@ The pipeline is designed for forward-compatible evolution without downtime:
 
 | Change | Impact | Action Required |
 |--------|--------|-----------------|
-| New FHIR field needed in analytics | None (raw_payload preserved) | `ALTER TABLE ADD COLUMN` + update Flink extraction |
+| New FHIR field needed in analytics | None (raw_payload preserved) | `ALTER TABLE ADD COLUMN ... MATERIALIZED` on `inbound_event_logs` |
 | New FHIR resource type | Auto-captured (LowCardinality String) | Update dashboard filters |
 | PostgreSQL table gains a column | Debezium auto-captures | `ALTER TABLE ADD COLUMN` on ClickHouse side |
 | PostgreSQL table dropped/renamed | Debezium connector errors | Reconfigure connector `table.include.list` |
-| New Kafka topic | New data stream | Add Flink job + ClickHouse table |
+| New PostgreSQL table needed | Add CDC capture | Add to Debezium config + create ClickHouse table + optional MV |
 
-**Key invariant:** The `raw_payload` column in `events_fact` stores the full FHIR resource as-is. Any new field extraction is a non-breaking addition — historical data can always be backfilled from `raw_payload` using ClickHouse's JSON functions.
+**Key invariant:** The `raw_payload` column in `inbound_event_logs` stores the full CloudEvent (including FHIR resource) as-is. Any new field extraction is a non-breaking addition — historical data can always be backfilled from `raw_payload` using ClickHouse's JSON functions.
 
 ---
 
@@ -307,8 +288,9 @@ The pipeline is designed for forward-compatible evolution without downtime:
 
 | Enhancement | Trigger | Approach |
 |-------------|---------|----------|
-| **Predictive analytics** | Clinical program request | Add Python/ML models in Flink or external service reading from ClickHouse |
+| **Predictive analytics** | Clinical program request | Python/ML models reading from ClickHouse via external service |
 | **Alerting** | Operational need | Superset alerts or Grafana alerting rules on ClickHouse metrics |
 | **Multi-cluster** | Geographic expansion | ClickHouse distributed tables across regions |
-| **Data lake** | Long-term archival | Flink sink to object storage (S3/MinIO) in Parquet format |
+| **Data lake** | Long-term archival | ClickHouse S3 table function for cold storage in Parquet |
 | **API layer** | External integrations need programmatic access | Lightweight read-only API over ClickHouse (e.g., Cube.js or custom thin service) |
+| **Additional MATERIALIZED columns** | New analytics dimension needed | `ALTER TABLE ADD COLUMN ... MATERIALIZED JSONExtract(...)` — no pipeline changes |

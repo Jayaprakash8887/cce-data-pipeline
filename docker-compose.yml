@@ -32,56 +32,6 @@ services:
           memory: 4g
 
   # ============================================================
-  # Stream Processing (Flink)
-  # ============================================================
-  flink-jobmanager:
-    image: flink:1.19.1-java21
-    container_name: cce-flink-jobmanager
-    ports:
-      - "8081:8081"   # Flink Web UI
-    command: jobmanager
-    environment:
-      FLINK_PROPERTIES: |
-        jobmanager.rpc.address: flink-jobmanager
-        state.backend: rocksdb
-        state.checkpoints.dir: file:///opt/flink/checkpoints
-        execution.checkpointing.interval: 60000
-        execution.checkpointing.min-pause: 30000
-        restart-strategy: fixed-delay
-        restart-strategy.fixed-delay.attempts: 3
-        restart-strategy.fixed-delay.delay: 10s
-        metrics.reporter.prom.factory.class: org.apache.flink.metrics.prometheus.PrometheusReporterFactory
-        metrics.reporter.prom.port: 9249
-    volumes:
-      - flink-checkpoints:/opt/flink/checkpoints
-    healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:8081/overview"]
-      interval: 15s
-      timeout: 5s
-      retries: 5
-
-  flink-taskmanager:
-    image: flink:1.19.1-java21
-    container_name: cce-flink-taskmanager
-    depends_on:
-      flink-jobmanager:
-        condition: service_healthy
-    command: taskmanager
-    environment:
-      FLINK_PROPERTIES: |
-        jobmanager.rpc.address: flink-jobmanager
-        taskmanager.numberOfTaskSlots: 4
-        state.backend: rocksdb
-        state.checkpoints.dir: file:///opt/flink/checkpoints
-        execution.checkpointing.interval: 60000
-    volumes:
-      - flink-checkpoints:/opt/flink/checkpoints
-    deploy:
-      resources:
-        limits:
-          memory: 2g
-
-  # ============================================================
   # CDC (Kafka Connect + Debezium)
   # ============================================================
   kafka-connect:
@@ -212,7 +162,6 @@ services:
 
 volumes:
   clickhouse-data:
-  flink-checkpoints:
   superset-db-data:
   prometheus-data:
   grafana-data:

@@ -27,24 +27,22 @@ GROUP BY day
 ORDER BY day;
 
 -- Chart: Facility × Protocol Heatmap
+-- Note: protocol_instances doesn't have facility_id; show by protocol only
 SELECT
-    pi.facility_id,
     dictGet('dict_protocol_definitions', 'name', pi.protocol_definition_id) AS protocol_name,
+    pi.status,
     round(countIf(si.state = 'COMPLETED') / nullIf(count(si.id), 0) * 100, 1) AS adherence_pct
 FROM protocol_instances pi FINAL
 LEFT JOIN step_instances si FINAL ON si.protocol_instance_id = pi.id
-WHERE pi.facility_id IS NOT NULL
-GROUP BY pi.facility_id, protocol_name;
+GROUP BY protocol_name, pi.status;
 
 -- Table: Protocol Instance Details
 SELECT
     pi.id,
     pi.patient_id,
-    pi.facility_id,
     dictGet('dict_protocol_definitions', 'name', pi.protocol_definition_id) AS protocol_name,
     pi.status,
-    pi.enrolled_at,
-    pi.completed_at
+    pi.enrolled_at
 FROM protocol_instances pi FINAL
 ORDER BY pi.enrolled_at DESC
 LIMIT 50;

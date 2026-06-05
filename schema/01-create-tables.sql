@@ -1,5 +1,5 @@
 -- CCE Analytics ClickHouse Schema
--- Task 1.1: All fact + dimension tables
+-- CDC-only architecture: all tables populated via Debezium CDC from PostgreSQL
 -- Run: clickhouse-client --database cce_analytics < schema/01-create-tables.sql
 
 CREATE DATABASE IF NOT EXISTS cce_analytics;
@@ -7,85 +7,7 @@ CREATE DATABASE IF NOT EXISTS cce_analytics;
 USE cce_analytics;
 
 -- ============================================================
--- FACT TABLES (Event-Sourced from Kafka Streams)
--- ============================================================
-
--- Primary analytics table: all clinical events from cce.events.inbound
-CREATE TABLE IF NOT EXISTS events_fact (
-    event_id           String,
-    source             LowCardinality(String),
-    event_type         LowCardinality(String),
-    patient_id         String,
-    event_time         DateTime64(3),
-    facility_id        LowCardinality(String),
-    correlation_id     String,
-    content_type       LowCardinality(String),
-    resource_type      LowCardinality(String),
-    resource_status    LowCardinality(String),
-    primary_code_system String,
-    primary_code       String,
-    primary_code_display String,
-    practitioner_ref   Nullable(String),
-    practitioner_display Nullable(String),
-    processing_status  LowCardinality(String) DEFAULT 'UNMATCHED',
-    processed_at       DateTime64(3) DEFAULT now64(3),
-    raw_payload        String CODEC(ZSTD(3))
-)
-ENGINE = MergeTree()
-PARTITION BY toYYYYMM(event_time)
-ORDER BY (facility_id, resource_type, event_time, patient_id)
-TTL event_time + INTERVAL 2 YEAR
-SETTINGS index_granularity = 8192;
-
--- Pre-aggregated hourly event counts (populated by Flink tumbling window)
-CREATE TABLE IF NOT EXISTS event_volume_hourly (
-    hour           DateTime,
-    facility_id    LowCardinality(String),
-    source         LowCardinality(String),
-    event_type     LowCardinality(String),
-    resource_type  LowCardinality(String),
-    event_count    UInt64
-)
-ENGINE = SummingMergeTree()
-PARTITION BY toYYYYMM(hour)
-ORDER BY (facility_id, source, event_type, resource_type, hour);
-
--- Intelligence triggers from cce.intelligence.triggers Kafka topic
-CREATE TABLE IF NOT EXISTS intelligence_events (
-    id                      UUID,
-    subject                 String,
-    intelligence_event_id   UUID,
-    action_definition_id    UUID,
-    protocol_definition_id  UUID,
-    action_type             LowCardinality(String),
-    severity                LowCardinality(String),
-    intelligence_destination LowCardinality(String),
-    step_state              LowCardinality(String),
-    action_id               String,
-    protocol_canonical      String,
-    detected_at             DateTime64(3),
-    processed_at            DateTime64(3) DEFAULT now64(3)
-)
-ENGINE = MergeTree()
-PARTITION BY toYYYYMM(detected_at)
-ORDER BY (severity, step_state, detected_at)
-TTL detected_at + INTERVAL 2 YEAR;
-
--- Scheduler step transitions from cce.scheduler.triggers
-CREATE TABLE IF NOT EXISTS step_transitions (
-    step_instance_id    UUID,
-    transition_type     LowCardinality(String),
-    triggered_at        DateTime64(3),
-    correlation_id      String,
-    processed_at        DateTime64(3) DEFAULT now64(3)
-)
-ENGINE = MergeTree()
-PARTITION BY toYYYYMM(triggered_at)
-ORDER BY (transition_type, triggered_at, step_instance_id)
-TTL triggered_at + INTERVAL 2 YEAR;
-
--- ============================================================
--- DIMENSION TABLES (from CDC via Debezium/ClickHouse Sink)
+-- CDC TABLES (from Debezium/ClickHouse Sink)
 -- ============================================================
 
 -- Patient protocol enrollments
@@ -160,13 +82,18 @@ CREATE TABLE IF NOT EXISTS inbound_event_logs (
     event_time       Nullable(DateTime64(3)) MATERIALIZED
         toDateTime64OrNull(JSONExtractString(raw_payload, 'time'), 3),
     resource_type    String MATERIALIZED
-        JSONExtractString(JSONExtractRaw(raw_payload, 'data'), 'resourceType')
+        JSONExtractString(JSONExtractRaw(raw_payload, 'data'), 'resourceType'),
+    patient_id       String ALIAS subject,
+    practitioner_ref String MATERIALIZED
+        JSONExtractString(JSONExtractRaw(raw_payload, 'data'), 'practitionerRef'),
+    practitioner_display String MATERIALIZED
+        JSONExtractString(JSONExtractRaw(raw_payload, 'data'), 'practitionerDisplay')
 )
 ENGINE = ReplacingMergeTree(_version)
 PARTITION BY toYYYYMM(received_at)
 ORDER BY (source, received_at, id);
 
--- Intelligence delivery outcomes (enriched by Flink CDC job)
+-- Intelligence delivery outcomes
 CREATE TABLE IF NOT EXISTS intelligence_deliveries (
     id                          UUID,
     intelligence_event_id       UUID,

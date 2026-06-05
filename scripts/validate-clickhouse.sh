@@ -29,20 +29,17 @@ echo "✓ Database 'cce_analytics' exists"
 
 # Expected tables
 EXPECTED_TABLES=(
-    "events_fact"
-    "event_volume_hourly"
-    "intelligence_events"
-    "step_transitions"
     "protocol_instances"
     "step_instances"
     "deviations"
-    "inbound_events"
+    "inbound_event_logs"
     "intelligence_deliveries"
     "intelligence_event_logs"
     "action_definitions"
     "protocol_definitions"
     "receiver_adaptors"
     "destination_adaptor_mappings"
+    "compliance_event_logs"
 )
 
 echo ""
@@ -60,14 +57,17 @@ done
 
 # Expected materialized views
 EXPECTED_MVS=(
+    "mv_event_volume_hourly"
     "mv_event_volume_daily"
     "mv_compliance_summary"
     "mv_deviation_trends"
     "mv_ingestion_quality"
-    "mv_deviation_by_facility"
+    "mv_deviation_by_protocol"
     "mv_intelligence_summary"
     "mv_delivery_performance_hourly"
-    "mv_scheduler_transitions_daily"
+    "mv_step_states_daily"
+    "mv_practitioner_summary"
+    "mv_facility_summary"
 )
 
 echo ""

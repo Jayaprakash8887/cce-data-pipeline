@@ -20,36 +20,36 @@ WHERE d.detected_at >= now() - INTERVAL 30 DAY;
 
 -- Chart: Deviations by Step (action_id grouped bar)
 SELECT
-    d.action_id,
+    si.action_id,
     d.deviation_type,
     count() AS count
-FROM deviations d
+FROM deviations d FINAL
+JOIN step_instances si FINAL ON d.step_instance_id = si.id
 WHERE d.detected_at >= now() - INTERVAL 30 DAY
-    AND d.action_id IS NOT NULL
-GROUP BY d.action_id, d.deviation_type
+GROUP BY si.action_id, d.deviation_type
 ORDER BY count DESC
 LIMIT 20;
 
--- Chart: Deviations by Facility
+-- Chart: Deviations by Protocol
 SELECT
-    facility_id,
-    sum(deviation_count) AS total_deviations,
-    sum(affected_patients) AS affected_patients
-FROM mv_deviation_by_facility
+    protocol_instance_id,
+    deviation_type,
+    sum(deviation_count) AS total_deviations
+FROM mv_deviation_by_protocol
 WHERE day >= today() - 30
-GROUP BY facility_id
-ORDER BY total_deviations DESC;
+GROUP BY protocol_instance_id, deviation_type
+ORDER BY total_deviations DESC
+LIMIT 20;
 
 -- Table: Deviation Details
 SELECT
     d.detected_at,
-    d.patient_id,
-    d.facility_id,
+    pi.patient_id,
     d.deviation_type,
-    d.action_id,
-    dictGet('dict_protocol_definitions', 'name', d.protocol_definition_id) AS protocol_name,
+    dictGet('dict_protocol_definitions', 'name', pi.protocol_definition_id) AS protocol_name,
     si.state AS current_step_state
-FROM deviations d
+FROM deviations d FINAL
 LEFT JOIN step_instances si FINAL ON d.step_instance_id = si.id
+LEFT JOIN protocol_instances pi FINAL ON d.protocol_instance_id = pi.id
 ORDER BY d.detected_at DESC
 LIMIT 50;

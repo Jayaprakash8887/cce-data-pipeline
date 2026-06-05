@@ -36,28 +36,28 @@ echo "  Database ID: ${DB_ID}"
 
 # Register datasets (tables + MVs)
 DATASETS=(
-    "events_fact"
-    "event_volume_hourly"
-    "intelligence_events"
-    "step_transitions"
     "protocol_instances"
     "step_instances"
     "deviations"
-    "inbound_events"
+    "inbound_event_logs"
     "intelligence_deliveries"
     "intelligence_event_logs"
     "action_definitions"
     "protocol_definitions"
     "receiver_adaptors"
     "destination_adaptor_mappings"
+    "compliance_event_logs"
+    "mv_event_volume_hourly"
     "mv_event_volume_daily"
     "mv_compliance_summary"
     "mv_deviation_trends"
     "mv_ingestion_quality"
-    "mv_deviation_by_facility"
+    "mv_deviation_by_protocol"
     "mv_intelligence_summary"
     "mv_delivery_performance_hourly"
-    "mv_scheduler_transitions_daily"
+    "mv_step_states_daily"
+    "mv_practitioner_summary"
+    "mv_facility_summary"
 )
 
 echo ""
@@ -82,9 +82,9 @@ RLS_PAYLOAD='{
   "name": "Facility-based data isolation",
   "filter_type": "Regular",
   "tables": [
-    {"id": 1, "table_name": "events_fact"},
-    {"id": 3, "table_name": "protocol_instances"},
-    {"id": 7, "table_name": "deviations"}
+    {"id": 4, "table_name": "inbound_event_logs"},
+    {"id": 1, "table_name": "protocol_instances"},
+    {"id": 3, "table_name": "deviations"}
   ],
   "roles": [{"id": 4, "name": "Gamma"}],
   "clause": "facility_id = '\''{{ current_user().extra_attributes.facility_id }}'\''"

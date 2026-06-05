@@ -1,20 +1,21 @@
 -- Dashboard 9: Intelligence & Triggers
--- Trigger volume, action type distribution, severity heatmap
+-- Trigger volume, action type distribution, destination heatmap
+-- Uses mv_intelligence_summary (AggregatingMergeTree — requires -Merge combinators)
 
--- Chart: Trigger Volume by Severity (line, daily)
+-- Chart: Trigger Volume by Trigger Reason (line, daily)
 SELECT
     day,
-    severity,
-    sum(trigger_count) AS triggers
+    trigger_reason,
+    countMerge(trigger_count) AS triggers
 FROM mv_intelligence_summary
 WHERE day >= today() - 30
-GROUP BY day, severity
+GROUP BY day, trigger_reason
 ORDER BY day;
 
 -- Chart: Action Type Distribution (donut)
 SELECT
     action_type,
-    sum(trigger_count) AS count
+    countMerge(trigger_count) AS count
 FROM mv_intelligence_summary
 WHERE day >= today() - 7
 GROUP BY action_type;
@@ -22,30 +23,29 @@ GROUP BY action_type;
 -- Chart: Destination Bar
 SELECT
     intelligence_destination,
-    sum(trigger_count) AS count
+    countMerge(trigger_count) AS count
 FROM mv_intelligence_summary
 WHERE day >= today() - 7
 GROUP BY intelligence_destination
 ORDER BY count DESC;
 
--- Chart: Severity × Step State Heatmap
+-- Chart: Action Type × Step State Heatmap
 SELECT
-    severity,
+    action_type,
     step_state,
-    sum(trigger_count) AS count
+    countMerge(trigger_count) AS count
 FROM mv_intelligence_summary
 WHERE day >= today() - 7
-GROUP BY severity, step_state;
+GROUP BY action_type, step_state;
 
 -- Table: Recent Intelligence Triggers
 SELECT
-    ie.detected_at,
-    ie.subject,
-    ie.severity,
-    ie.action_type,
-    ie.intelligence_destination,
-    ie.step_state,
-    ie.protocol_canonical
-FROM intelligence_events ie
-ORDER BY ie.detected_at DESC
+    iel.created_at,
+    iel.subject,
+    iel.action_type,
+    iel.intelligence_destination,
+    iel.step_state,
+    iel.trigger_reason
+FROM intelligence_event_logs iel FINAL
+ORDER BY iel.created_at DESC
 LIMIT 30;

@@ -6,19 +6,19 @@ groups:
     folder: CCE Data Pipeline
     interval: 60s
     rules:
-      - uid: flink-job-down
-        title: "Flink Job Down"
+      - uid: cdc-sink-connector-down
+        title: "CDC Sink Connector Down"
         condition: A
         data:
           - refId: A
             datasourceUid: prometheus
             model:
-              expr: "flink_jobmanager_numRunningJobs < 5"
+              expr: "kafka_connect_connector_status{connector=\"cce-clickhouse-sink\"} != 1"
               intervalMs: 60000
         for: 5m
         annotations:
-          summary: "One or more Flink jobs are not running"
-          description: "Expected 5 jobs, got {{ $value }}"
+          summary: "ClickHouse sink connector is not running"
+          description: "Connector status: {{ $value }}"
         labels:
           severity: critical
 
@@ -44,7 +44,7 @@ groups:
           - refId: A
             datasourceUid: clickhouse
             model:
-              rawSql: "SELECT quantile(0.95)(dateDiff('second', event_time, processed_at)) FROM cce_analytics.events_fact WHERE processed_at >= now() - INTERVAL 5 MINUTE"
+              rawSql: "SELECT quantile(0.95)(dateDiff('second', event_time, received_at)) FROM cce_analytics.inbound_event_logs WHERE received_at >= now() - INTERVAL 5 MINUTE AND event_time IS NOT NULL"
         for: 5m
         annotations:
           summary: "P95 end-to-end latency exceeds 60 seconds"

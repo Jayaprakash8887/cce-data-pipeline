@@ -1,16 +1,14 @@
 #!/usr/bin/env bash
-# End-to-End Integration Test Suite for CCE Data Pipeline
+# End-to-End Integration Test Suite for CCE Data Pipeline (CDC-only architecture)
 # Prerequisites: docker compose up -d (all services healthy)
-# Usage: ./tests/e2e/run-e2e-tests.sh [clickhouse-host] [kafka-bootstrap]
+# Usage: ./tests/e2e/run-e2e-tests.sh [clickhouse-host]
 
 set -euo pipefail
 
 CH_HOST="${1:-localhost}"
 CH_PORT="${CH_PORT:-8123}"
-KAFKA_BOOTSTRAP="${2:-localhost:9092}"
 CH_DB="cce_analytics"
 CONNECT_URL="http://localhost:8083"
-FLINK_URL="http://localhost:8081"
 
 PASS=0
 FAIL=0
@@ -30,9 +28,8 @@ ch_query() {
 }
 
 # ============================================================
-echo "=== CCE Data Pipeline — E2E Test Suite ==="
+echo "=== CCE Data Pipeline — E2E Test Suite (CDC-only) ==="
 echo "ClickHouse: ${CH_HOST}:${CH_PORT}"
-echo "Kafka: ${KAFKA_BOOTSTRAP}"
 echo ""
 
 # ============================================================
@@ -43,13 +40,6 @@ if curl -sf "http://${CH_HOST}:${CH_PORT}/ping" > /dev/null; then
     log_pass "ClickHouse is healthy"
 else
     log_fail "ClickHouse is not responding"
-fi
-
-# Flink
-if curl -sf "${FLINK_URL}/overview" > /dev/null; then
-    log_pass "Flink JobManager is healthy"
-else
-    log_fail "Flink JobManager is not responding"
 fi
 
 # Kafka Connect
@@ -63,99 +53,66 @@ fi
 echo ""
 echo "--- 2. Schema Validation ---"
 
-TABLE_COUNT=$(ch_query "SELECT count() FROM system.tables WHERE database = '${CH_DB}'" | tr -d '[:space:]')
-if [[ "$TABLE_COUNT" -ge 14 ]]; then
-    log_pass "ClickHouse has ${TABLE_COUNT} tables (expected >= 14)"
+TABLE_COUNT=$(ch_query "SELECT count() FROM system.tables WHERE database = '${CH_DB}' AND engine NOT IN ('MaterializedView')" | tr -d '[:space:]')
+if [[ "$TABLE_COUNT" -ge 11 ]]; then
+    log_pass "ClickHouse has ${TABLE_COUNT} tables (expected >= 11)"
 else
-    log_fail "ClickHouse has ${TABLE_COUNT} tables (expected >= 14)"
+    log_fail "ClickHouse has ${TABLE_COUNT} tables (expected >= 11)"
 fi
 
 MV_COUNT=$(ch_query "SELECT count() FROM system.tables WHERE database = '${CH_DB}' AND engine = 'MaterializedView'" | tr -d '[:space:]')
-if [[ "$MV_COUNT" -ge 8 ]]; then
-    log_pass "ClickHouse has ${MV_COUNT} materialized views (expected >= 8)"
+if [[ "$MV_COUNT" -ge 10 ]]; then
+    log_pass "ClickHouse has ${MV_COUNT} materialized views (expected >= 10)"
 else
-    log_fail "ClickHouse has ${MV_COUNT} materialized views (expected >= 8)"
-fi
-
-DICT_COUNT=$(ch_query "SELECT count() FROM system.dictionaries WHERE database = '${CH_DB}'" | tr -d '[:space:]')
-if [[ "$DICT_COUNT" -ge 1 ]]; then
-    log_pass "ClickHouse has ${DICT_COUNT} dictionary (expected >= 1)"
-else
-    log_fail "ClickHouse has ${DICT_COUNT} dictionaries (expected >= 1)"
+    log_fail "ClickHouse has ${MV_COUNT} materialized views (expected >= 10)"
 fi
 
 # ============================================================
 echo ""
-echo "--- 3. Event Ingestion E2E ---"
+echo "--- 3. CDC Data Flow ---"
 
-# Produce a test CloudEvent to the inbound topic
-TEST_EVENT_ID="e2e-test-$(date +%s)"
-TEST_EVENT=$(cat <<EOF
-{
-  "specversion": "1.0",
-  "id": "${TEST_EVENT_ID}",
-  "type": "org.cce.fhir.encounter",
-  "source": "e2e-test",
-  "time": "$(date -u +%Y-%m-%dT%H:%M:%SZ)",
-  "data": {
-    "resourceType": "Encounter",
-    "id": "${TEST_EVENT_ID}",
-    "subject": { "reference": "Patient/e2e-patient-001" },
-    "participant": [
-      { "individual": { "reference": "Practitioner/e2e-doc-001" } }
-    ],
-    "class": { "code": "AMB" },
-    "serviceType": { "coding": [{ "code": "e2e-service" }] },
-    "location": [{ "location": { "reference": "Location/e2e-facility-001" } }]
-  }
-}
-EOF
-)
-
-echo "$TEST_EVENT" | kafka-console-producer \
-    --bootstrap-server "$KAFKA_BOOTSTRAP" \
-    --topic cce.events.inbound 2>/dev/null && \
-    log_info "Published test event ${TEST_EVENT_ID}" || \
-    log_fail "Failed to publish test event"
-
-# Wait for processing
-log_info "Waiting 15s for pipeline processing..."
-sleep 15
-
-# Verify the event landed in events_fact
-FOUND=$(ch_query "SELECT count() FROM events_fact WHERE event_id = '${TEST_EVENT_ID}'" | tr -d '[:space:]')
-if [[ "$FOUND" == "1" ]]; then
-    log_pass "Test event found in events_fact"
+# Verify inbound_event_logs has data from CDC
+INBOUND_COUNT=$(ch_query "SELECT count() FROM inbound_event_logs FINAL" | tr -d '[:space:]')
+if [[ "$INBOUND_COUNT" -ge 1 ]]; then
+    log_pass "inbound_event_logs has ${INBOUND_COUNT} rows (CDC flowing)"
 else
-    log_fail "Test event NOT found in events_fact (found: ${FOUND})"
+    log_fail "inbound_event_logs is empty (CDC not flowing)"
 fi
 
-# Verify patient_id extraction
-PATIENT=$(ch_query "SELECT patient_id FROM events_fact WHERE event_id = '${TEST_EVENT_ID}'" | tr -d '[:space:]')
-if [[ "$PATIENT" == "e2e-patient-001" ]]; then
-    log_pass "patient_id correctly extracted: ${PATIENT}"
+# Verify MATERIALIZED column extraction works
+EXTRACTED=$(ch_query "SELECT count() FROM inbound_event_logs WHERE facility_id != '' AND event_type != ''" | tr -d '[:space:]')
+if [[ "$EXTRACTED" -ge 1 ]]; then
+    log_pass "MATERIALIZED columns extracting correctly (${EXTRACTED} rows with facility_id + event_type)"
 else
-    log_fail "patient_id incorrect: '${PATIENT}' (expected 'e2e-patient-001')"
+    log_fail "MATERIALIZED columns not extracting (no rows with facility_id + event_type)"
 fi
 
-# Verify practitioner extraction
-PRACTITIONER=$(ch_query "SELECT practitioner_id FROM events_fact WHERE event_id = '${TEST_EVENT_ID}'" | tr -d '[:space:]')
-if [[ "$PRACTITIONER" == "e2e-doc-001" ]]; then
-    log_pass "practitioner_id correctly extracted: ${PRACTITIONER}"
+# Verify protocol_instances CDC
+PI_COUNT=$(ch_query "SELECT count() FROM protocol_instances FINAL" | tr -d '[:space:]')
+if [[ "$PI_COUNT" -ge 1 ]]; then
+    log_pass "protocol_instances has ${PI_COUNT} rows"
 else
-    log_fail "practitioner_id incorrect: '${PRACTITIONER}' (expected 'e2e-doc-001')"
+    log_fail "protocol_instances is empty"
 fi
 
 # ============================================================
 echo ""
-echo "--- 4. Aggregation Pipeline ---"
+echo "--- 4. Materialized View Population ---"
 
-# Check event_volume_hourly got the event
-HOUR_COUNT=$(ch_query "SELECT sum(event_count) FROM event_volume_hourly WHERE event_type = 'org.cce.fhir.encounter' AND window_start >= now() - INTERVAL 2 HOUR" | tr -d '[:space:]')
-if [[ "$HOUR_COUNT" -ge 1 ]]; then
-    log_pass "event_volume_hourly has aggregated events (count: ${HOUR_COUNT})"
+# Check event volume MV is populated
+VOL_COUNT=$(ch_query "SELECT sum(event_count) FROM mv_event_volume_hourly" | tr -d '[:space:]')
+if [[ "$VOL_COUNT" -ge 1 ]]; then
+    log_pass "mv_event_volume_hourly has aggregated events (count: ${VOL_COUNT})"
 else
-    log_fail "event_volume_hourly has no recent aggregated events"
+    log_fail "mv_event_volume_hourly is empty"
+fi
+
+# Check daily/hourly consistency
+CONSISTENCY=$(ch_query "SELECT if(abs(a - b) <= greatest(a, 1) * 0.01, 1, 0) FROM (SELECT sum(event_count) as a FROM mv_event_volume_daily) x, (SELECT sum(event_count) as b FROM mv_event_volume_hourly) y" | tr -d '[:space:]')
+if [[ "$CONSISTENCY" == "1" ]]; then
+    log_pass "mv_event_volume_daily consistent with hourly"
+else
+    log_fail "mv_event_volume_daily/hourly mismatch"
 fi
 
 # ============================================================
@@ -180,13 +137,14 @@ fi
 
 # ============================================================
 echo ""
-echo "--- 6. Flink Jobs ---"
+echo "--- 6. Data Quality ---"
 
-JOB_COUNT=$(curl -sf "${FLINK_URL}/jobs/overview" 2>/dev/null | grep -o '"state":"RUNNING"' | wc -l)
-if [[ "$JOB_COUNT" -ge 5 ]]; then
-    log_pass "Flink has ${JOB_COUNT} running jobs (expected >= 5)"
+# No orphaned step_instances
+ORPHANS=$(ch_query "SELECT count() FROM step_instances FINAL WHERE protocol_instance_id NOT IN (SELECT id FROM protocol_instances FINAL)" | tr -d '[:space:]')
+if [[ "$ORPHANS" == "0" ]]; then
+    log_pass "No orphaned step_instances"
 else
-    log_fail "Flink has ${JOB_COUNT} running jobs (expected >= 5)"
+    log_fail "Found ${ORPHANS} orphaned step_instances"
 fi
 
 # ============================================================

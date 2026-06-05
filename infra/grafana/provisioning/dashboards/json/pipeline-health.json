@@ -22,29 +22,14 @@
       }
     },
     {
-      "title": "Flink Checkpoint Duration",
+      "title": "Kafka Connect Sink Throughput",
       "type": "timeseries",
       "gridPos": { "h": 8, "w": 12, "x": 12, "y": 0 },
       "datasource": "Prometheus",
       "targets": [
         {
-          "expr": "flink_jobmanager_job_lastCheckpointDuration{job=\"flink\"}",
-          "legendFormat": "{{job_name}}"
-        }
-      ],
-      "fieldConfig": {
-        "defaults": { "unit": "ms" }
-      }
-    },
-    {
-      "title": "Flink Throughput (records/sec)",
-      "type": "timeseries",
-      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 8 },
-      "datasource": "Prometheus",
-      "targets": [
-        {
-          "expr": "sum(rate(flink_taskmanager_job_task_numRecordsInPerSecond[5m])) by (job_name)",
-          "legendFormat": "{{job_name}}"
+          "expr": "sum(rate(kafka_connect_sink_connector_sink_record_send_total{connector=~\"cce-.*\"}[5m])) by (connector)",
+          "legendFormat": "{{connector}}"
         }
       ],
       "fieldConfig": {
@@ -52,27 +37,33 @@
       }
     },
     {
-      "title": "Flink Backpressure",
-      "type": "gauge",
+      "title": "CDC Connector Lag (records)",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 8 },
+      "datasource": "Prometheus",
+      "targets": [
+        {
+          "expr": "sum(kafka_consumer_group_lag{group=\"cce-data-pipeline-connect\"}) by (topic)",
+          "legendFormat": "{{topic}}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": { "unit": "short" }
+      }
+    },
+    {
+      "title": "ClickHouse Insert Rate",
+      "type": "timeseries",
       "gridPos": { "h": 8, "w": 12, "x": 12, "y": 8 },
       "datasource": "Prometheus",
       "targets": [
         {
-          "expr": "avg(flink_taskmanager_job_task_backPressuredTimeMsPerSecond) by (job_name)",
-          "legendFormat": "{{job_name}}"
+          "expr": "rate(ClickHouseProfileEvents_InsertedRows[5m])",
+          "legendFormat": "rows/sec"
         }
       ],
       "fieldConfig": {
-        "defaults": {
-          "unit": "ms",
-          "thresholds": {
-            "steps": [
-              { "value": 0, "color": "green" },
-              { "value": 100, "color": "yellow" },
-              { "value": 500, "color": "red" }
-            ]
-          }
-        }
+        "defaults": { "unit": "ops" }
       }
     },
     {
@@ -121,13 +112,13 @@
       }
     },
     {
-      "title": "End-to-End Latency",
+      "title": "CDC End-to-End Latency (commit → ClickHouse)",
       "type": "timeseries",
       "gridPos": { "h": 8, "w": 12, "x": 0, "y": 20 },
       "datasource": "ClickHouse",
       "targets": [
         {
-          "rawSql": "SELECT toStartOfMinute(processed_at) AS time, quantile(0.5)(dateDiff('second', event_time, processed_at)) AS p50, quantile(0.95)(dateDiff('second', event_time, processed_at)) AS p95, quantile(0.99)(dateDiff('second', event_time, processed_at)) AS p99 FROM cce_analytics.events_fact WHERE processed_at >= now() - INTERVAL 1 HOUR GROUP BY time ORDER BY time",
+          "rawSql": "SELECT toStartOfMinute(received_at) AS time, quantile(0.5)(dateDiff('second', event_time, received_at)) AS p50, quantile(0.95)(dateDiff('second', event_time, received_at)) AS p95 FROM cce_analytics.inbound_event_logs WHERE received_at >= now() - INTERVAL 1 HOUR AND event_time IS NOT NULL GROUP BY time ORDER BY time",
           "format": "time_series"
         }
       ],

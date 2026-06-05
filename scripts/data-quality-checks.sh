@@ -67,18 +67,18 @@ echo "Host: ${CH_HOST}:${CH_PORT} | Database: ${CH_DB}"
 echo ""
 
 echo "--- Table Row Counts ---"
-check_gt "events_fact has rows" "SELECT count() FROM events_fact" 0
-check_gt "event_volume_hourly has rows" "SELECT count() FROM event_volume_hourly" 0
-check_gt "intelligence_events has rows" "SELECT count() FROM intelligence_events" 0
-check_gt "step_transitions has rows" "SELECT count() FROM step_transitions" 0
-check_gt "protocol_definitions has rows" "SELECT count() FROM protocol_definitions" 0
+check_gt "inbound_event_logs has rows" "SELECT count() FROM inbound_event_logs FINAL" 0
+check_gt "protocol_definitions has rows" "SELECT count() FROM protocol_definitions FINAL" 0
+check_gt "protocol_instances has rows" "SELECT count() FROM protocol_instances FINAL" 0
+check_gt "step_instances has rows" "SELECT count() FROM step_instances FINAL" 0
+check_gt "intelligence_event_logs has rows" "SELECT count() FROM intelligence_event_logs FINAL" 0
 
 echo ""
 echo "--- Referential Integrity ---"
-check_eq_zero "events_fact: no NULL patient_id" \
-    "SELECT count() FROM events_fact WHERE patient_id = ''"
-check_eq_zero "events_fact: no future event_time" \
-    "SELECT count() FROM events_fact WHERE event_time > now() + INTERVAL 1 HOUR"
+check_eq_zero "inbound_event_logs: no empty source" \
+    "SELECT count() FROM inbound_event_logs FINAL WHERE source = ''"
+check_eq_zero "inbound_event_logs: no future received_at" \
+    "SELECT count() FROM inbound_event_logs FINAL WHERE received_at > now() + INTERVAL 1 HOUR"
 check_eq_zero "step_instances: orphaned protocol_instance_id" \
     "SELECT count() FROM step_instances FINAL WHERE protocol_instance_id NOT IN (SELECT id FROM protocol_instances FINAL)"
 check_eq_zero "deviations: orphaned step_instance_id" \
@@ -86,22 +86,22 @@ check_eq_zero "deviations: orphaned step_instance_id" \
 
 echo ""
 echo "--- Freshness ---"
-check "events_fact fresh (last 10min)" \
-    "SELECT if(max(processed_at) >= now() - INTERVAL 10 MINUTE, 'ok', 'stale') FROM events_fact" \
+check "inbound_event_logs fresh (last 10min)" \
+    "SELECT if(max(received_at) >= now() - INTERVAL 10 MINUTE, 'ok', 'stale') FROM inbound_event_logs" \
     "ok"
-check "event_volume_hourly fresh (last 2h)" \
-    "SELECT if(max(hour) >= now() - INTERVAL 2 HOUR, 'ok', 'stale') FROM event_volume_hourly" \
+check "intelligence_event_logs fresh (last 1h)" \
+    "SELECT if(max(created_at) >= now() - INTERVAL 1 HOUR, 'ok', 'stale') FROM intelligence_event_logs" \
     "ok"
 
 echo ""
 echo "--- Materialized View Consistency ---"
-check_eq_zero "MV daily vs hourly drift" \
-    "SELECT abs(a - b) FROM (SELECT sum(event_count) as a FROM mv_event_volume_daily WHERE day = today()) x, (SELECT sum(event_count) as b FROM event_volume_hourly WHERE toDate(hour) = today()) y WHERE abs(a-b) > a * 0.01"
+check_eq_zero "MV daily vs hourly volume drift" \
+    "SELECT if(abs(a - b) > greatest(a, 1) * 0.01, 1, 0) FROM (SELECT sum(event_count) as a FROM mv_event_volume_daily WHERE day = today()) x, (SELECT sum(event_count) as b FROM mv_event_volume_hourly WHERE toDate(hour) = today()) y"
 
 echo ""
 echo "--- Duplicates ---"
-check_eq_zero "events_fact: no duplicate event_id (last hour)" \
-    "SELECT count() FROM (SELECT event_id, count() as c FROM events_fact WHERE processed_at >= now() - INTERVAL 1 HOUR GROUP BY event_id HAVING c > 1)"
+check_eq_zero "inbound_event_logs: no duplicate cloudevents_id (last hour)" \
+    "SELECT count() FROM (SELECT cloudevents_id, count() as c FROM inbound_event_logs WHERE received_at >= now() - INTERVAL 1 HOUR GROUP BY cloudevents_id HAVING c > 1)"
 
 echo ""
 echo "=== Results ==="
