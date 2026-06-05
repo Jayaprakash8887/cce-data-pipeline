@@ -283,3 +283,52 @@ AS SELECT
     countState() AS step_count
 FROM step_instances
 GROUP BY day, protocol_instance_id, action_id, state, completion_status;
+
+-- Step states per patient (JOIN step_instances → protocol_instances for patient_id)
+CREATE MATERIALIZED VIEW IF NOT EXISTS mv_step_states_by_patient
+ENGINE = AggregatingMergeTree()
+PARTITION BY toYYYYMM(day)
+ORDER BY (patient_id, state, day)
+AS SELECT
+    toStartOfDay(si.updated_at) AS day,
+    pi.patient_id AS patient_id,
+    si.state,
+    si.completion_status,
+    countState() AS step_count,
+    uniqState(si.protocol_instance_id) AS unique_protocols
+FROM step_instances si
+INNER JOIN protocol_instances pi ON si.protocol_instance_id = pi.id
+GROUP BY day, pi.patient_id, si.state, si.completion_status;
+
+-- Intelligence triggers per protocol (enables: "which protocols generate the most alerts?")
+CREATE MATERIALIZED VIEW IF NOT EXISTS mv_intelligence_by_protocol
+ENGINE = AggregatingMergeTree()
+PARTITION BY toYYYYMM(day)
+ORDER BY (protocol_instance_id, action_type, day)
+AS SELECT
+    toStartOfDay(created_at) AS day,
+    protocol_instance_id,
+    action_type,
+    intelligence_destination,
+    trigger_reason,
+    countState() AS trigger_count,
+    uniqState(subject) AS unique_patients
+FROM intelligence_event_logs
+GROUP BY day, protocol_instance_id, action_type, intelligence_destination, trigger_reason;
+
+-- Delivery outcomes per protocol (enables: delivery success rate by protocol)
+CREATE MATERIALIZED VIEW IF NOT EXISTS mv_delivery_by_protocol
+ENGINE = AggregatingMergeTree()
+PARTITION BY toYYYYMM(day)
+ORDER BY (protocol_canonical, destination, day)
+AS SELECT
+    toStartOfDay(created_at) AS day,
+    protocol_canonical,
+    destination,
+    action_type,
+    countState() AS total_deliveries,
+    countIfState(status = 'DELIVERED') AS delivered,
+    countIfState(status = 'FAILED') AS failed,
+    uniqState(subject) AS unique_patients
+FROM intelligence_deliveries
+GROUP BY day, protocol_canonical, destination, action_type;

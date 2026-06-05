@@ -247,8 +247,32 @@ Materialized Views in ClickHouse are triggered on INSERT — they read from the 
 | `mv_intelligence_by_patient` | `intelligence_event_logs` | AggregatingMergeTree | `countState()` per subject/action_type/day |
 | `mv_delivery_by_patient` | `intelligence_deliveries` | AggregatingMergeTree | `countIfState(status)` per subject/destination/day |
 | `mv_step_states_by_protocol` | `step_instances` | AggregatingMergeTree | `countState()` per protocol_instance_id/state/day |
+| `mv_step_states_by_patient` | `step_instances` JOIN `protocol_instances` | AggregatingMergeTree | `countState()` per patient/state/day |
+| `mv_intelligence_by_protocol` | `intelligence_event_logs` | AggregatingMergeTree | `countState()` per protocol_instance_id/action_type/day |
+| `mv_delivery_by_protocol` | `intelligence_deliveries` | AggregatingMergeTree | `countIfState(status)` per protocol_canonical/destination/day |
 
-### 4.3 Query Patterns
+### 4.3 Entity × Behavior Coverage Matrix
+
+Every meaningful Entity × Behavior combination is pre-aggregated or resolvable via dictionary at query time.
+
+| Behavior ↓ / Entity → | Patient | Facility | Practitioner | Protocol | Resource Type | Source |
+|---|---|---|---|---|---|---|
+| **Event Ingestion** | `mv_facility_summary` (uniq) | `mv_event_volume_hourly/daily` | `mv_practitioner_summary` | — | `mv_event_volume_hourly/daily` | `mv_event_volume_hourly/daily` |
+| **Ingestion Quality** | — | — | — | — | — | `mv_ingestion_quality` |
+| **Compliance** | `mv_compliance_by_patient` | via `dict_patient_facility` | n/a | `mv_compliance_summary` | — | — |
+| **Deviations** | `mv_deviation_by_patient` | via `dict_patient_facility` | n/a | `mv_deviation_by_protocol` | — | — |
+| **Intelligence Triggers** | `mv_intelligence_by_patient` | via `dict_patient_facility` | n/a | `mv_intelligence_by_protocol` | — | — |
+| **Delivery** | `mv_delivery_by_patient` | via `dict_patient_facility` | n/a | `mv_delivery_by_protocol` | — | — |
+| **Step States** | `mv_step_states_by_patient` | via `dict_patient_facility` | n/a | `mv_step_states_by_protocol` | — | — |
+| **Facility Summary** | `mv_facility_summary` (uniq) | `mv_facility_summary` | `mv_facility_summary` (uniq) | — | `mv_facility_summary` | — |
+| **Practitioner Activity** | `mv_practitioner_summary` (uniq) | `mv_practitioner_summary` | `mv_practitioner_summary` | — | `mv_practitioner_summary` | — |
+
+**Legend:**
+- **n/a** — not applicable (practitioners don't own compliance/deviations/intelligence in the data model; they originate from inbound FHIR events only)
+- **via `dict_patient_facility`** — resolve at query time with `dictGet('dict_patient_facility', 'facility_id', patient_id)`
+- **—** — not a meaningful dimension for this behavior
+
+### 4.4 Query Patterns
 
 **SummingMergeTree queries** — use `sum()`:
 ```sql

@@ -77,6 +77,9 @@ Pre-aggregated analytics computed at insert time:
 | `mv_intelligence_by_patient` | `intelligence_event_logs` | Intelligence triggers per patient |
 | `mv_delivery_by_patient` | `intelligence_deliveries` | Delivery outcomes per patient |
 | `mv_step_states_by_protocol` | `step_instances` | Step states per protocol |
+| `mv_step_states_by_patient` | `step_instances` JOIN `protocol_instances` | Step states per patient |
+| `mv_intelligence_by_protocol` | `intelligence_event_logs` | Intelligence triggers per protocol |
+| `mv_delivery_by_protocol` | `intelligence_deliveries` | Delivery outcomes per protocol |
 
 ## Documentation
 
