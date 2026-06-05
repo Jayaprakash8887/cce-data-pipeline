@@ -5,10 +5,10 @@
 USE cce_analytics;
 
 -- ============================================================
--- Event Volume (from inbound_event_logs CDC, replaces Flink tumbling window)
+-- Event Volume (from inbound_event_logs CDC)
 -- ============================================================
 
--- Hourly event volume by facility/source/type (replaces event_volume_hourly table + Flink job)
+-- Hourly event volume by facility/source/type
 CREATE MATERIALIZED VIEW IF NOT EXISTS mv_event_volume_hourly
 ENGINE = SummingMergeTree()
 PARTITION BY toYYYYMM(hour)

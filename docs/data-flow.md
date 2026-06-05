@@ -122,12 +122,6 @@ practitioner_display String MATERIALIZED
     JSONExtractString(JSONExtractRaw(raw_payload, 'data'), 'practitionerDisplay')
 ```
 
-**Why MATERIALIZED columns instead of Flink enrichment:**
-- Same result (extracted fields available for queries)
-- No additional infrastructure (no JobManager, TaskManagers, checkpoints)
-- No failure modes beyond ClickHouse itself
-- Fields are computed once at insert, stored on disk, read at zero cost
-
 ### 3.3 Table DDL Summary
 
 #### `inbound_event_logs` (primary analytics table)
@@ -216,7 +210,7 @@ practitioner_display String MATERIALIZED
 
 ## 4. Materialized Views (Pre-Aggregation)
 
-Materialized Views in ClickHouse are triggered on INSERT — they read from the source table and write pre-aggregated results to a target table. This replaces Flink windowed aggregation.
+Materialized Views in ClickHouse are triggered on INSERT — they read from the source table and write pre-aggregated results to a target table.
 
 ### 4.1 Engine Selection
 

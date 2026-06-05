@@ -35,7 +35,6 @@ PostgreSQL (WAL) → Debezium → Kafka (CDC topics) → ClickHouse Sink → Cli
 | Prometheus | `prom/prometheus:v2.53.0` | Metrics collection |
 | Grafana | `grafana/grafana:11.0.0` | Pipeline health dashboards |
 
-**Not deployed (by design):** No Flink, no stream processing, no custom application JARs.
 
 ---
 

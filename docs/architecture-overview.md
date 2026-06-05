@@ -70,7 +70,7 @@ graph TB
 |---|-----------|-----------|
 | 1 | **Open-source only** | No vendor lock-in; community support; cost-effective |
 | 2 | **CDC-only (committed data)** | Analytics based solely on data committed to PostgreSQL — eliminates discrepancies from in-flight Kafka events that may be rejected or reprocessed |
-| 3 | **No custom stream processing** | ClickHouse MATERIALIZED columns + Materialized Views replace Flink — fewer moving parts, less operational burden |
+| 3 | **No custom stream processing** | ClickHouse MATERIALIZED columns + Materialized Views |
 | 4 | **Schema-on-read flexibility** | ClickHouse's JSON functions handle evolving FHIR payloads without migrations; `raw_payload` preserved for future extraction |
 | 5 | **Immutable append-only** | All analytics data captured via CDC; ReplacingMergeTree handles updates idempotently |
 | 6 | **Self-service analytics** | Operations teams build their own dashboards; no engineering dependency |
@@ -104,8 +104,8 @@ graph TB
 
 **ClickHouse 24.8** — columnar OLAP database:
 
-- **MATERIALIZED columns** on `inbound_event_logs` extract fields from `raw_payload` at insert time (`facility_id`, `event_type`, `patient_id`, `practitioner_ref`, `resource_type`) — replaces Flink enrichment
-- **Materialized Views** pre-aggregate metrics (event volume, practitioner activity, facility summary, compliance, intelligence) — replaces Flink tumbling windows
+- **MATERIALIZED columns** on `inbound_event_logs` extract fields from `raw_payload` at insert time (`facility_id`, `event_type`, `patient_id`, `practitioner_ref`, `resource_type`)
+- **Materialized Views** pre-aggregate metrics (event volume, practitioner activity, facility summary, compliance, intelligence)
 - Sub-second query response on 100M+ rows
 - TTL-based data lifecycle management
 - Low storage footprint via columnar compression (10-40x vs row stores)

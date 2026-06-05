@@ -147,7 +147,6 @@ Each task below produces a discrete, reviewable PR. Tasks are ordered by depende
 - `docs/index.md` — Documentation index
 
 **Acceptance criteria:**
-- No references to Flink or old table names (events_fact, intelligence_events, step_transitions)
 - All SQL examples use current table/MV names
 - Architecture diagrams reflect CDC-only design
 

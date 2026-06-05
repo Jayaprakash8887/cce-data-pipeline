@@ -320,12 +320,3 @@ flowchart TD
 - **Kafka Connect / Debezium:** Rolling restart; connectors resume from stored offsets
 - **Superset:** Blue-green deployment (stateless; metadata in PostgreSQL)
 
-### 7.3 Why No Flink / Stream Processing
-
-The original design included Apache Flink for event enrichment and aggregation. This was removed because:
-
-1. **MATERIALIZED columns** in ClickHouse extract JSON fields at insert time — equivalent to Flink's enrichment job with zero operational overhead
-2. **Materialized Views** pre-aggregate on INSERT — equivalent to Flink's windowed aggregations
-3. **Eliminates an entire infrastructure component** — no JobManager, TaskManagers, checkpoints, state management
-4. **Simpler failure modes** — if ClickHouse is up, enrichment and aggregation work. No separate process to monitor
-5. **Analytics on committed data only** — CDC from PostgreSQL means analytics reflect actual database state, not potentially rejected in-flight events
