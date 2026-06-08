@@ -5,6 +5,8 @@
 USE cce_analytics;
 
 -- Protocol definitions lookup (protocol_definition_id → name, canonical, etc.)
+-- Uses QUERY with FINAL: protocol_definitions is a ReplacingMergeTree; reading via TABLE
+-- without FINAL can return duplicate rows from unmerged parts, corrupting dict lookups.
 CREATE DICTIONARY IF NOT EXISTS dict_protocol_definitions (
     id UUID,
     name String,
@@ -15,7 +17,7 @@ CREATE DICTIONARY IF NOT EXISTS dict_protocol_definitions (
 )
 PRIMARY KEY id
 SOURCE(CLICKHOUSE(
-    TABLE 'protocol_definitions'
+    QUERY 'SELECT id, name, version, url, url AS canonical, status FROM cce_analytics.protocol_definitions FINAL'
     DB 'cce_analytics'
 ))
 LIFETIME(MIN 60 MAX 300)
@@ -39,17 +41,17 @@ LIFETIME(MIN 300 MAX 600)
 LAYOUT(COMPLEX_KEY_HASHED());
 
 -- Action definitions lookup (action_definition_id → name, action_type, canonical_url)
+-- Uses QUERY with FINAL for same reason as dict_protocol_definitions above.
 CREATE DICTIONARY IF NOT EXISTS dict_action_definitions (
     id UUID,
     canonical_url String,
     name String DEFAULT '',
-    title String DEFAULT '',
     action_type String,
     status String
 )
 PRIMARY KEY id
 SOURCE(CLICKHOUSE(
-    TABLE 'action_definitions'
+    QUERY 'SELECT id, url AS canonical_url, name, kind AS action_type, status FROM cce_analytics.action_definitions FINAL'
     DB 'cce_analytics'
 ))
 LIFETIME(MIN 60 MAX 300)

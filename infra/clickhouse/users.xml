@@ -1,13 +1,43 @@
 <clickhouse>
+    <profiles>
+        <!-- Analytics profile: FINAL applied automatically so ad-hoc Superset SQL Lab
+             queries get correct deduplication without needing explicit FINAL clauses. -->
+        <analytics>
+            <final>1</final>
+            <max_memory_usage>10000000000</max_memory_usage>
+            <max_execution_time>60</max_execution_time>
+            <readonly>1</readonly>
+        </analytics>
+
+        <!-- PeerDB write profile: no FINAL (PeerDB only INSERTs),
+             no readonly restriction, no execution time limit. -->
+        <peerdb_writer>
+            <final>0</final>
+            <readonly>0</readonly>
+        </peerdb_writer>
+    </profiles>
+
     <users>
+        <!-- Superset / analysts: read-only with automatic FINAL -->
         <cce_pipeline>
             <password_sha256_hex/>
             <networks>
                 <ip>::/0</ip>
             </networks>
-            <profile>default</profile>
+            <profile>analytics</profile>
             <quota>default</quota>
             <access_management>0</access_management>
         </cce_pipeline>
+
+        <!-- PeerDB CDC writer: full write access, no FINAL overhead -->
+        <cce_cdc_writer>
+            <password_sha256_hex/>
+            <networks>
+                <ip>::/0</ip>
+            </networks>
+            <profile>peerdb_writer</profile>
+            <quota>default</quota>
+            <access_management>0</access_management>
+        </cce_cdc_writer>
     </users>
 </clickhouse>

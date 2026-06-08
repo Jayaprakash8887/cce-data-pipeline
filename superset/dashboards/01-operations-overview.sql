@@ -35,13 +35,13 @@ GROUP BY hour
 ORDER BY hour;
 
 -- Chart: Compliance by Protocol (donut)
+-- dictGet replaces JOIN on protocol_definitions: O(1) hash lookup vs full table scan + FINAL
 SELECT
-    pd.name AS protocol_name,
+    dictGet('dict_protocol_definitions', 'name', pi.protocol_definition_id) AS protocol_name,
     countIf(pi.status = 'COMPLETED') AS completed,
     countIf(pi.status = 'ACTIVE') AS active,
     countIf(pi.status IN ('WITHDRAWN', 'EXPIRED')) AS other
 FROM protocol_instances pi FINAL
-JOIN protocol_definitions pd FINAL ON pd.id = pi.protocol_definition_id
 GROUP BY protocol_name;
 
 -- Chart: Facility Deviation Bar (top 10)
