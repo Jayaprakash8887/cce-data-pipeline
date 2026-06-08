@@ -72,7 +72,11 @@ GROUP BY day, protocol_instance_id, deviation_type;
 -- Ingestion Quality
 -- ============================================================
 
--- Ingestion source quality metrics
+-- Ingestion source quality metrics.
+-- RECEIVED is excluded: inbound_event_log rows are inserted as RECEIVED then updated
+-- to a terminal state (ACCEPTED, REJECTED, DUPLICATE). Each CDC UPDATE arrives as a
+-- new INSERT; filtering out RECEIVED ensures only terminal-state rows are counted,
+-- exactly once, with no double-counting.
 CREATE MATERIALIZED VIEW IF NOT EXISTS mv_ingestion_quality
 ENGINE = SummingMergeTree()
 PARTITION BY toYYYYMM(day)
@@ -84,6 +88,7 @@ AS SELECT
     rejection_reason,
     count() AS event_count
 FROM inbound_event_logs
+WHERE status != 'RECEIVED'
 GROUP BY day, source, status, rejection_reason;
 
 -- ============================================================
