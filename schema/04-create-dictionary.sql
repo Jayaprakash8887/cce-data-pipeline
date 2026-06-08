@@ -23,7 +23,8 @@ LAYOUT(HASHED());
 
 -- Patient → most recent facility mapping
 -- Enables facility-level behavioral metrics without JOINs at query time
--- Source: subquery that picks the latest facility per patient from inbound_event_logs
+-- Uses a QUERY with argMax to force deduplication at load time — reading the table
+-- directly without FINAL would return duplicate rows from unmerged ReplacingMergeTree parts.
 CREATE DICTIONARY IF NOT EXISTS dict_patient_facility (
     patient_id String,
     facility_id String,
@@ -31,13 +32,8 @@ CREATE DICTIONARY IF NOT EXISTS dict_patient_facility (
 )
 PRIMARY KEY patient_id
 SOURCE(CLICKHOUSE(
-    QUERY 'SELECT
-        subject AS patient_id,
-        argMax(facility_id, received_at) AS facility_id,
-        max(received_at) AS last_seen
-    FROM cce_analytics.inbound_event_logs
-    WHERE subject != '''' AND facility_id != ''''
-    GROUP BY subject'
+    QUERY 'SELECT patient_id, argMax(facility_id, last_seen) AS facility_id, max(last_seen) AS last_seen FROM cce_analytics.mv_patient_facility_latest GROUP BY patient_id'
+    DB 'cce_analytics'
 ))
 LIFETIME(MIN 300 MAX 600)
 LAYOUT(COMPLEX_KEY_HASHED());

@@ -1,0 +1,135 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: peerdb
+  namespace: cce-data-pipeline
+  labels:
+    app: peerdb
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: peerdb
+  template:
+    metadata:
+      labels:
+        app: peerdb
+    spec:
+      containers:
+      - name: peerdb
+        image: peerdbio/peerdb-server:stable
+        ports:
+        - containerPort: 8085
+          name: api
+        - containerPort: 2112
+          name: metrics
+        env:
+        - name: PEERDB_CATALOG_HOST
+          value: peerdb-catalog
+        - name: PEERDB_CATALOG_PORT
+          value: "5432"
+        - name: PEERDB_CATALOG_USER
+          value: peerdb
+        - name: PEERDB_CATALOG_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: peerdb-catalog-secret
+              key: password
+        - name: PEERDB_CATALOG_DATABASE
+          value: peerdb
+        resources:
+          requests:
+            cpu: "500m"
+            memory: "512Mi"
+          limits:
+            cpu: "1"
+            memory: "1Gi"
+        livenessProbe:
+          httpGet:
+            path: /health
+            port: 8085
+          initialDelaySeconds: 30
+          periodSeconds: 15
+        readinessProbe:
+          httpGet:
+            path: /health
+            port: 8085
+          initialDelaySeconds: 15
+          periodSeconds: 10
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: peerdb-catalog
+  namespace: cce-data-pipeline
+  labels:
+    app: peerdb-catalog
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: peerdb-catalog
+  template:
+    metadata:
+      labels:
+        app: peerdb-catalog
+    spec:
+      containers:
+      - name: postgres
+        image: postgres:16-alpine
+        ports:
+        - containerPort: 5432
+          name: postgres
+        env:
+        - name: POSTGRES_DB
+          value: peerdb
+        - name: POSTGRES_USER
+          value: peerdb
+        - name: POSTGRES_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: peerdb-catalog-secret
+              key: password
+        resources:
+          requests:
+            cpu: "250m"
+            memory: "256Mi"
+          limits:
+            cpu: "500m"
+            memory: "512Mi"
+        volumeMounts:
+        - name: catalog-data
+          mountPath: /var/lib/postgresql/data
+      volumes:
+      - name: catalog-data
+        persistentVolumeClaim:
+          claimName: peerdb-catalog-pvc
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: peerdb
+  namespace: cce-data-pipeline
+spec:
+  selector:
+    app: peerdb
+  ports:
+  - port: 8085
+    targetPort: 8085
+    name: api
+  - port: 2112
+    targetPort: 2112
+    name: metrics
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: peerdb-catalog
+  namespace: cce-data-pipeline
+spec:
+  selector:
+    app: peerdb-catalog
+  ports:
+  - port: 5432
+    targetPort: 5432
+    name: postgres

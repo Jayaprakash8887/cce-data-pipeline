@@ -79,10 +79,12 @@ check_eq_zero "inbound_event_logs: no empty source" \
     "SELECT count() FROM inbound_event_logs FINAL WHERE source = ''"
 check_eq_zero "inbound_event_logs: no future received_at" \
     "SELECT count() FROM inbound_event_logs FINAL WHERE received_at > now() + INTERVAL 1 HOUR"
+# Use LEFT JOIN instead of NOT IN: NOT IN returns no rows (silent false-pass) when
+# the subquery contains any NULLs, and is slow on large tables.
 check_eq_zero "step_instances: orphaned protocol_instance_id" \
-    "SELECT count() FROM step_instances FINAL WHERE protocol_instance_id NOT IN (SELECT id FROM protocol_instances FINAL)"
+    "SELECT count() FROM step_instances si FINAL LEFT JOIN protocol_instances pi FINAL ON si.protocol_instance_id = pi.id WHERE pi.id = toUUID('00000000-0000-0000-0000-000000000000') OR isNull(pi.id)"
 check_eq_zero "deviations: orphaned step_instance_id" \
-    "SELECT count() FROM deviations FINAL WHERE step_instance_id NOT IN (SELECT id FROM step_instances FINAL)"
+    "SELECT count() FROM deviations d FINAL LEFT JOIN step_instances si FINAL ON d.step_instance_id = si.id WHERE si.id = toUUID('00000000-0000-0000-0000-000000000000') OR isNull(si.id)"
 
 echo ""
 echo "--- Freshness ---"
@@ -95,8 +97,9 @@ check "intelligence_event_logs fresh (last 1h)" \
 
 echo ""
 echo "--- Materialized View Consistency ---"
-check_eq_zero "MV daily vs hourly volume drift" \
-    "SELECT if(abs(a - b) > greatest(a, 1) * 0.01, 1, 0) FROM (SELECT sum(event_count) as a FROM mv_event_volume_daily WHERE day = today()) x, (SELECT sum(event_count) as b FROM mv_event_volume_hourly WHERE toDate(hour) = today()) y"
+# Verify ingestion quality MV matches raw table (accepted event counts should align)
+check_eq_zero "mv_ingestion_quality vs inbound_event_logs drift (today)" \
+    "SELECT if(abs(a - b) > greatest(a, 1) * 0.01, 1, 0) FROM (SELECT sum(event_count) as a FROM mv_ingestion_quality WHERE day = today() AND status = 'ACCEPTED') x, (SELECT sum(event_count) as b FROM mv_event_volume_hourly WHERE toDate(hour) = today()) y"
 
 echo ""
 echo "--- Duplicates ---"

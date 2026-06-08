@@ -2,7 +2,7 @@
 
 ## Overview
 
-The CCE Data Pipeline replaces the custom `cce-insights-service` and `cce-insights-ui` with a CDC-only analytics stack (**Debezium + ClickHouse + Superset**). All data flows from committed PostgreSQL records via Change Data Capture — no Kafka topic consumption or stream processing.
+The CCE Data Pipeline replaces the custom `cce-insights-service` and `cce-insights-ui` with a CDC-only analytics stack (**PeerDB + ClickHouse + Superset**). All data flows from committed PostgreSQL records via Change Data Capture — no Kafka, no custom stream processing.
 
 **Core principle:** Analytics should be purely on committed data in the database.
 
@@ -24,7 +24,7 @@ The CCE Data Pipeline replaces the custom `cce-insights-service` and `cce-insigh
 ### Data Path
 
 ```
-PostgreSQL (WAL) → Debezium Source Connector → Kafka (CDC topics) → ClickHouse Sink Connector → ClickHouse (MVs + Dictionaries) → Apache Superset
+PostgreSQL (WAL) → PeerDB (direct replication) → ClickHouse (MVs + Dictionaries) → Apache Superset
 ```
 
 ### Reading Order

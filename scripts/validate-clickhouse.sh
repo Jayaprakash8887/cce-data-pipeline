@@ -27,7 +27,7 @@ if [[ "$DB_EXISTS" != "1" ]]; then
 fi
 echo "✓ Database 'cce_analytics' exists"
 
-# Expected tables
+# Expected CDC base tables (created by PeerDB mirror)
 EXPECTED_TABLES=(
     "protocol_instances"
     "step_instances"
@@ -43,7 +43,7 @@ EXPECTED_TABLES=(
 )
 
 echo ""
-echo "--- Tables ---"
+echo "--- Tables (${#EXPECTED_TABLES[@]} expected) ---"
 MISSING=0
 for table in "${EXPECTED_TABLES[@]}"; do
     EXISTS=$(curl -sf "${CH_URL}/?query=SELECT+count()+FROM+system.tables+WHERE+database='cce_analytics'+AND+name='${table}'" | tr -d '[:space:]')
@@ -55,23 +55,42 @@ for table in "${EXPECTED_TABLES[@]}"; do
     fi
 done
 
-# Expected materialized views
+# All materialized views
 EXPECTED_MVS=(
+    # Event volume
     "mv_event_volume_hourly"
-    "mv_event_volume_daily"
+    # Compliance
     "mv_compliance_summary"
+    "mv_compliance_by_patient"
+    "mv_compliance_processing_quality"
+    # Deviations
     "mv_deviation_trends"
-    "mv_ingestion_quality"
     "mv_deviation_by_protocol"
+    "mv_deviation_by_patient"
+    # Ingestion quality
+    "mv_ingestion_quality"
+    # Intelligence
     "mv_intelligence_summary"
+    "mv_intelligence_by_patient"
+    "mv_intelligence_by_protocol"
+    # Deliveries
     "mv_delivery_performance_hourly"
+    "mv_delivery_by_patient"
+    "mv_delivery_by_protocol"
+    # Steps / Scheduler
     "mv_step_states_daily"
+    "mv_step_states_by_protocol"
+    "mv_step_states_by_patient"
+    "mv_step_completion_timeliness"
+    # Practitioners / Facilities
     "mv_practitioner_summary"
     "mv_facility_summary"
+    # Patient-facility mapping (dict source)
+    "mv_patient_facility_latest"
 )
 
 echo ""
-echo "--- Materialized Views ---"
+echo "--- Materialized Views (${#EXPECTED_MVS[@]} expected) ---"
 for mv in "${EXPECTED_MVS[@]}"; do
     EXISTS=$(curl -sf "${CH_URL}/?query=SELECT+count()+FROM+system.tables+WHERE+database='cce_analytics'+AND+name='${mv}'" | tr -d '[:space:]')
     if [[ "$EXISTS" == "1" ]]; then
@@ -82,22 +101,44 @@ for mv in "${EXPECTED_MVS[@]}"; do
     fi
 done
 
-# Check dictionary
+# All three dictionaries
+EXPECTED_DICTS=(
+    "dict_protocol_definitions"
+    "dict_patient_facility"
+    "dict_action_definitions"
+)
+
 echo ""
-echo "--- Dictionaries ---"
-DICT_EXISTS=$(curl -sf "${CH_URL}/?query=SELECT+count()+FROM+system.dictionaries+WHERE+database='cce_analytics'+AND+name='dict_protocol_definitions'" | tr -d '[:space:]')
-if [[ "$DICT_EXISTS" == "1" ]]; then
-    echo "  ✓ dict_protocol_definitions"
-else
-    echo "  ✗ dict_protocol_definitions MISSING"
-    MISSING=$((MISSING + 1))
-fi
+echo "--- Dictionaries (${#EXPECTED_DICTS[@]} expected) ---"
+for dict in "${EXPECTED_DICTS[@]}"; do
+    EXISTS=$(curl -sf "${CH_URL}/?query=SELECT+count()+FROM+system.dictionaries+WHERE+database='cce_analytics'+AND+name='${dict}'" | tr -d '[:space:]')
+    if [[ "$EXISTS" == "1" ]]; then
+        echo "  ✓ ${dict}"
+    else
+        echo "  ✗ ${dict} MISSING"
+        MISSING=$((MISSING + 1))
+    fi
+done
+
+# Check MATERIALIZED columns were added to inbound_event_logs
+echo ""
+echo "--- MATERIALIZED columns on inbound_event_logs ---"
+MAT_COLS=("subject" "event_type" "facility_id" "event_time" "resource_type" "practitioner_ref" "practitioner_display")
+for col in "${MAT_COLS[@]}"; do
+    EXISTS=$(curl -sf "${CH_URL}/?query=SELECT+count()+FROM+system.columns+WHERE+database='cce_analytics'+AND+table='inbound_event_logs'+AND+name='${col}'" | tr -d '[:space:]')
+    if [[ "$EXISTS" == "1" ]]; then
+        echo "  ✓ ${col}"
+    else
+        echo "  ✗ ${col} MISSING — run schema/01-create-tables.sql"
+        MISSING=$((MISSING + 1))
+    fi
+done
 
 echo ""
 if [[ $MISSING -eq 0 ]]; then
     echo "=== ALL CHECKS PASSED ==="
     exit 0
 else
-    echo "=== ${MISSING} CHECKS FAILED ==="
+    echo "=== ${MISSING} CHECK(S) FAILED ==="
     exit 1
 fi

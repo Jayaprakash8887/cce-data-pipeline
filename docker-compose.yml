@@ -32,32 +32,40 @@ services:
           memory: 4g
 
   # ============================================================
-  # CDC (Kafka Connect + Debezium)
+  # CDC (PeerDB)
   # ============================================================
-  kafka-connect:
-    build:
-      context: ./docker
-      dockerfile: Dockerfile.kafka-connect
-    container_name: cce-kafka-connect
-    ports:
-      - "8083:8083"   # Connect REST API
+  peerdb-catalog:
+    image: postgres:16-alpine
+    container_name: cce-peerdb-catalog
     environment:
-      CONNECT_BOOTSTRAP_SERVERS: ${KAFKA_BOOTSTRAP_SERVERS:-kafka:9092}
-      CONNECT_REST_PORT: 8083
-      CONNECT_GROUP_ID: cce-data-pipeline-connect
-      CONNECT_CONFIG_STORAGE_TOPIC: _cce-connect-configs
-      CONNECT_OFFSET_STORAGE_TOPIC: _cce-connect-offsets
-      CONNECT_STATUS_STORAGE_TOPIC: _cce-connect-status
-      CONNECT_CONFIG_STORAGE_REPLICATION_FACTOR: 1
-      CONNECT_OFFSET_STORAGE_REPLICATION_FACTOR: 1
-      CONNECT_STATUS_STORAGE_REPLICATION_FACTOR: 1
-      CONNECT_KEY_CONVERTER: org.apache.kafka.connect.json.JsonConverter
-      CONNECT_VALUE_CONVERTER: org.apache.kafka.connect.json.JsonConverter
-      CONNECT_KEY_CONVERTER_SCHEMAS_ENABLE: "false"
-      CONNECT_VALUE_CONVERTER_SCHEMAS_ENABLE: "false"
-      CONNECT_PLUGIN_PATH: /usr/share/confluent-hub-components
+      POSTGRES_DB: peerdb
+      POSTGRES_USER: peerdb
+      POSTGRES_PASSWORD: ${PEERDB_CATALOG_PASSWORD:-peerdb_dev}
+    volumes:
+      - peerdb-catalog-data:/var/lib/postgresql/data
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:8083/connectors"]
+      test: ["CMD-SHELL", "pg_isready -U peerdb"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+  peerdb:
+    image: peerdbio/peerdb-server:stable
+    container_name: cce-peerdb
+    depends_on:
+      peerdb-catalog:
+        condition: service_healthy
+    ports:
+      - "8085:8085"   # PeerDB API
+      - "2112:2112"   # Prometheus metrics
+    environment:
+      PEERDB_CATALOG_HOST: peerdb-catalog
+      PEERDB_CATALOG_PORT: 5432
+      PEERDB_CATALOG_USER: peerdb
+      PEERDB_CATALOG_PASSWORD: ${PEERDB_CATALOG_PASSWORD:-peerdb_dev}
+      PEERDB_CATALOG_DATABASE: peerdb
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8085/health"]
       interval: 15s
       timeout: 5s
       retries: 10
@@ -162,6 +170,7 @@ services:
 
 volumes:
   clickhouse-data:
+  peerdb-catalog-data:
   superset-db-data:
   prometheus-data:
   grafana-data:

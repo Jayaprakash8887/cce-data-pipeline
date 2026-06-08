@@ -3,8 +3,8 @@
 
 -- KPI: Total Events (Last 24h)
 SELECT sum(event_count) AS total_events
-FROM mv_event_volume_daily
-WHERE day >= today() - 1;
+FROM mv_event_volume_hourly
+WHERE hour >= toStartOfHour(now() - INTERVAL 24 HOUR);
 
 -- KPI: Active Enrollments
 SELECT count() AS active_enrollments

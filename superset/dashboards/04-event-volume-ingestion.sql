@@ -1,12 +1,13 @@
 -- Dashboard 4: Event Volume & Ingestion
 -- Volume trend, resource type treemap, ingestion funnel, source quality
+-- Note: mv_event_volume_daily was removed; daily aggregation derived from the hourly MV.
 
 -- Chart: Event Volume Trend (line, daily)
 SELECT
-    day,
+    toDate(hour) AS day,
     sum(event_count) AS total_events
-FROM mv_event_volume_daily
-WHERE day >= today() - 30
+FROM mv_event_volume_hourly
+WHERE hour >= toStartOfHour(now() - INTERVAL 30 DAY)
 GROUP BY day
 ORDER BY day;
 
@@ -14,8 +15,8 @@ ORDER BY day;
 SELECT
     resource_type,
     sum(event_count) AS event_count
-FROM mv_event_volume_daily
-WHERE day >= today() - 7
+FROM mv_event_volume_hourly
+WHERE hour >= toStartOfHour(now() - INTERVAL 7 DAY)
 GROUP BY resource_type
 ORDER BY event_count DESC;
 
@@ -45,7 +46,7 @@ SELECT
     source,
     resource_type,
     sum(event_count) AS event_count
-FROM mv_event_volume_daily
-WHERE day >= today() - 7
+FROM mv_event_volume_hourly
+WHERE hour >= toStartOfHour(now() - INTERVAL 7 DAY)
 GROUP BY source, resource_type
 ORDER BY event_count DESC;

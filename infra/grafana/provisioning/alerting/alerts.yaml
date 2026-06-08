@@ -6,34 +6,34 @@ groups:
     folder: CCE Data Pipeline
     interval: 60s
     rules:
-      - uid: cdc-sink-connector-down
-        title: "CDC Sink Connector Down"
+      - uid: peerdb-mirror-not-running
+        title: "PeerDB Mirror Not Running"
         condition: A
         data:
           - refId: A
             datasourceUid: prometheus
             model:
-              expr: "kafka_connect_connector_status{connector=\"cce-clickhouse-sink\"} != 1"
+              expr: "peerdb_flow_status{flow_name=\"cce_analytics_mirror\"} != 1"
               intervalMs: 60000
         for: 5m
         annotations:
-          summary: "ClickHouse sink connector is not running"
-          description: "Connector status: {{ $value }}"
+          summary: "PeerDB CDC mirror is not running"
+          description: "Mirror status: {{ $value }} (0=error, 1=running, 2=paused)"
         labels:
           severity: critical
 
-      - uid: kafka-consumer-lag-high
-        title: "Kafka Consumer Lag High"
+      - uid: peerdb-cdc-lag-high
+        title: "PeerDB CDC Lag High"
         condition: A
         data:
           - refId: A
             datasourceUid: prometheus
             model:
-              expr: "sum(kafka_consumer_group_lag{group=~\"cce-.*\"}) by (topic) > 10000"
+              expr: "peerdb_cdc_lag_seconds{flow_name=\"cce_analytics_mirror\"} > 60"
               intervalMs: 60000
         for: 10m
         annotations:
-          summary: "Kafka consumer lag exceeds 10k for topic {{ $labels.topic }}"
+          summary: "PeerDB CDC lag exceeds 60 seconds"
         labels:
           severity: warning
 
@@ -80,17 +80,17 @@ groups:
         labels:
           severity: warning
 
-      - uid: dlq-messages
-        title: "DLQ Messages Detected"
+      - uid: peerdb-sync-errors
+        title: "PeerDB Sync Errors"
         condition: A
         data:
           - refId: A
             datasourceUid: prometheus
             model:
-              expr: "sum(kafka_consumer_group_lag{topic=~\".*\\.dlq\"}) > 0"
+              expr: "increase(peerdb_sync_errors_total{flow_name=\"cce_analytics_mirror\"}[5m]) > 0"
               intervalMs: 60000
         for: 2m
         annotations:
-          summary: "Dead letter queue has messages on {{ $labels.topic }}"
+          summary: "PeerDB mirror encountered sync errors"
         labels:
           severity: warning

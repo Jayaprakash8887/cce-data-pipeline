@@ -778,8 +778,7 @@ Register these as Superset datasets for drag-and-drop chart building:
 | Dataset Name | Source | Description |
 |-------------|--------|-------------|
 | `Inbound Event Logs` | `inbound_event_logs` | All clinical events with MATERIALIZED fields |
-| `Event Volume (Hourly)` | `mv_event_volume_hourly` | Pre-aggregated hourly event counts |
-| `Event Volume (Daily)` | `mv_event_volume_daily` | Pre-aggregated daily event counts |
+| `Event Volume (Hourly)` | `mv_event_volume_hourly` | Pre-aggregated hourly event counts; use `toDate(hour)` for daily roll-ups |
 | `Protocol Instances` | `protocol_instances FINAL` | Patient enrollments |
 | `Step Instances` | `step_instances FINAL` | Protocol step tracking |
 | `Deviations` | `deviations` | Compliance deviations |
@@ -885,29 +884,29 @@ Superset provides built-in export capabilities replacing the custom `ExportServi
 
 ## 13. Dashboard 11: Pipeline Health (Grafana)
 
-**Purpose:** Monitor the data pipeline infrastructure — CDC connectors, Kafka consumer lag, ClickHouse performance, and end-to-end latency. Deployed in **Grafana** (not Superset) to leverage native Prometheus integration.
+**Purpose:** Monitor the data pipeline infrastructure — PeerDB mirror health, CDC replication lag, ClickHouse performance, and end-to-end latency. Deployed in **Grafana** (not Superset) to leverage native Prometheus integration.
 
 ### Layout
 
 ```
 ┌──────────────────────────────────────────────────────────────────────────┐
-│  FILTERS: [Time Range] [Connector] [Topic]                               │
+│  FILTERS: [Time Range] [Mirror]                                          │
 ├────────────────┬────────────────┬────────────────┬───────────────────────┤
-│  KPI: CDC      │  KPI: Max      │  KPI: CH       │  KPI: End-to-End      │
-│  Connectors OK │  Consumer Lag  │  Insert Rate   │  Latency (P95)        │
+│  KPI: Mirror   │  KPI: CDC Lag  │  KPI: CH       │  KPI: End-to-End      │
+│  Status        │  (seconds)     │  Insert Rate   │  Latency (P95)        │
 ├────────────────┴────────────────┴────────────────┴───────────────────────┤
 │                                                                          │
-│  [Multi-Line] CDC Sink Throughput (records/sec per topic)                │
+│  [Multi-Line] PeerDB Rows Synced/sec (per mirror)                        │
 │                                                                          │
 ├─────────────────────────────────┬────────────────────────────────────────┤
 │  [Line Chart]                   │  [Line Chart]                          │
-│  ClickHouse Insert Rate         │  Kafka Consumer Lag                    │
-│  (rows/sec)                     │  (by topic/partition)                  │
+│  ClickHouse Insert Rate         │  PeerDB CDC Lag                        │
+│  (rows/sec)                     │  (seconds, by mirror)                  │
 │                                 │                                        │
 ├─────────────────────────────────┼────────────────────────────────────────┤
-│  [Gauge]                        │  [Line Chart]                          │
-│  Connector Status               │  ClickHouse Queries in Flight          │
-│  (green=RUNNING, red=FAILED)    │  + Merge Operations                    │
+│  [Stat Panel]                   │  [Line Chart]                          │
+│  PeerDB Mirror Status           │  ClickHouse Queries in Flight          │
+│  (RUNNING / ERROR / PAUSED)     │  + Merge Operations                    │
 │                                 │                                        │
 ├─────────────────────────────────┼────────────────────────────────────────┤
 │  [Line Chart]                   │  [Line Chart]                          │
@@ -916,9 +915,9 @@ Superset provides built-in export capabilities replacing the custom `ExportServi
 │  P50, P95, P99                  │                                        │
 │                                 │                                        │
 ├─────────────────────────────────┼────────────────────────────────────────┤
-│  [Status Panel]                 │  [Table]                               │
-│  Kafka Connect Connectors       │  CDC Replication Slot Status           │
-│  (source + sink status)         │  slot_name | lag_bytes | active        │
+│  [Line Chart]                   │  [Table]                               │
+│  PeerDB Sync Errors             │  CDC Replication Slot Status           │
+│  (errors/5m per mirror)         │  slot_name | lag_bytes | active        │
 │                                 │                                        │
 └─────────────────────────────────┴────────────────────────────────────────┘
 ```
@@ -942,9 +941,9 @@ ORDER BY minute;
 rate(ClickHouseProfileEvents_InsertedRows[5m])
 ```
 
-**Kafka Consumer Lag (Prometheus):**
+**PeerDB CDC Lag (Prometheus):**
 ```promql
-kafka_consumer_group_lag{group=~"connect-cce-clickhouse-sink.*",topic=~"cce\\.cdc\\..*"}
+peerdb_cdc_lag_seconds{flow_name=~"cce_.*"}
 ```
 
 **CDC Replication Slot Lag (PostgreSQL datasource in Grafana):**

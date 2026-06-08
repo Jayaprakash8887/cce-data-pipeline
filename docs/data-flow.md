@@ -2,18 +2,16 @@
 
 ## 1. Architecture Overview
 
-The CCE Data Pipeline uses a **CDC-only** architecture. All data flows from committed PostgreSQL records via Change Data Capture — no Kafka topic consumption or custom stream processing.
+The CCE Data Pipeline uses a **CDC-only** architecture. All data flows from committed PostgreSQL records via Change Data Capture — no Kafka, no custom stream processing.
 
 ```mermaid
 flowchart LR
     subgraph Source
-        PG["PostgreSQL 16<br/>Shared by all CCE services"]
+        PG["PostgreSQL 16<br/>Shared by all CCE services<br/>(ccedb)"]
     end
 
-    subgraph CDC Layer
-        DEB["Debezium Source<br/>(Kafka Connect)"]
-        KAFKA["Kafka<br/>(CDC Topics)"]
-        SINK["ClickHouse Sink<br/>(Kafka Connect)"]
+    subgraph CDC
+        PEER["PeerDB<br/>(Logical Replication)"]
     end
 
     subgraph Analytics
@@ -22,10 +20,8 @@ flowchart LR
         SS["Apache Superset"]
     end
 
-    PG -->|WAL| DEB
-    DEB --> KAFKA
-    KAFKA --> SINK
-    SINK --> CH
+    PG -->|WAL| PEER
+    PEER -->|S3/MinIO stage| CH
     CH -->|INSERT triggers| MV
     CH --> SS
     MV --> SS
@@ -40,54 +36,49 @@ flowchart LR
 
 ## 2. CDC Pipeline
 
-### 2.1 Source → Debezium → Kafka
+### 2.1 PeerDB Mirror (PostgreSQL → ClickHouse)
 
-Debezium reads the PostgreSQL Write-Ahead Log (WAL) and produces change events to Kafka topics.
+PeerDB reads the PostgreSQL Write-Ahead Log (WAL) via logical replication and writes directly to ClickHouse using an S3/MinIO intermediary stage for performance.
 
-**Configuration:**
-- Plugin: `pgoutput` (native PostgreSQL logical decoding)
-- Slot: `cce_analytics_slot`
+**Configuration** (see `connectors/peerdb-mirror.sql`):
+- Replication slot: `cce_analytics_slot`
 - Publication: `cce_analytics_pub`
-- Transform: `ExtractNewRecordState` (unwrap envelope to flat record)
-- Additional fields: `op`, `table`, `lsn`, `source.ts_ms`
+- Sync interval: 10 seconds
+- Soft delete: enabled (`_peerdb_is_deleted` column)
+- Initial snapshot: parallelized (4 tables, 8 workers)
 
-**Topic naming convention:**
-```
-cce.cdc.public.<table_name>
-```
+**Source Tables (all from shared `ccedb` database):**
 
-**CDC Topics (all from shared `ccedb` database, topic prefix `cce.cdc`):**
+| Table Owner | Source Table | ClickHouse Table |
+|-------------|-------------|-----------------|
+| Collector Service | `inbound_event_log` | `inbound_event_logs` |
+| Compliance Service | `protocol_definition` | `protocol_definitions` |
+| Compliance Service | `protocol_instance` | `protocol_instances` |
+| Compliance Service | `step_instance` | `step_instances` |
+| Compliance Service | `deviation` | `deviations` |
+| Compliance Service | `intelligence_event_log` | `intelligence_event_logs` |
+| Compliance Service | `action_definition` | `action_definitions` |
+| Compliance Service | `compliance_event_log` | `compliance_event_logs` |
+| Intelligence Service | `intelligence_delivery` | `intelligence_deliveries` |
+| Intelligence Service | `receiver_adaptor` | `receiver_adaptors` |
+| Intelligence Service | `destination_adaptor_mapping` | `destination_adaptor_mappings` |
 
-| Table Owner | Source Table | Kafka Topic |
-|-------------|-------------|-------------|
-| Collector Service | `inbound_event_log` | `cce.cdc.public.inbound_event_log` |
-| Compliance Service | `protocol_definition` | `cce.cdc.public.protocol_definition` |
-| Compliance Service | `protocol_instance` | `cce.cdc.public.protocol_instance` |
-| Compliance Service | `step_instance` | `cce.cdc.public.step_instance` |
-| Compliance Service | `deviation` | `cce.cdc.public.deviation` |
-| Compliance Service | `intelligence_event_log` | `cce.cdc.public.intelligence_event_log` |
-| Compliance Service | `action_definition` | `cce.cdc.public.action_definition` |
-| Compliance Service | `compliance_event_log` | `cce.cdc.public.compliance_event_log` |
-| Intelligence Service | `intelligence_delivery` | `cce.cdc.public.intelligence_delivery` |
-| Intelligence Service | `receiver_adaptor` | `cce.cdc.public.receiver_adaptor` |
-| Intelligence Service | `destination_adaptor_mapping` | `cce.cdc.public.destination_adaptor_mapping` |
+> **Note:** All CCE services share a single PostgreSQL database (`ccedb`). `REPLICA IDENTITY FULL` is set on all tables to ensure TOAST'd JSONB columns are fully replicated during UPDATEs.
 
-> **Note:** All CCE services share a single PostgreSQL database (`ccedb`). Debezium uses `topic.prefix=cce.cdc` and captures the `public` schema — topic pattern: `cce.cdc.public.<table>`.
+### 2.2 Deduplication & Delete Handling
 
-### 2.2 Kafka → ClickHouse Sink
+PeerDB uses `ReplacingMergeTree(_peerdb_version)` for idempotent upserts.
 
-The ClickHouse Kafka Connect Sink connector consumes CDC topics and writes to ClickHouse tables using `ReplacingMergeTree` with a `_version` column for idempotent upserts.
+**Deduplication strategy:**
+- `_peerdb_version` increases monotonically per row
+- `ReplacingMergeTree(_peerdb_version)` deduplicates on the ORDER BY key, keeping the highest version
+- Background merges collapse duplicates asynchronously
+- **Queries MUST use `FINAL`** or subqueries with `argMax()` when exact deduplication is needed before merges complete
 
-**Sink configuration:**
-- `exactlyOnce=true`
-- `batch.size=10000`
-- `retry.count=3`
-- Topic-to-table mapping configured per topic
-
-**Debezium `_version` handling:**
-- `_version` is derived from the source LSN (Log Sequence Number)
-- `ReplacingMergeTree(_version)` deduplicates on the ORDER BY key, keeping the highest `_version`
-- Queries use `FINAL` or subqueries with `argMax()` when exact deduplication is needed
+**Delete handling (soft deletes):**
+- PeerDB marks deleted rows with `_peerdb_is_deleted = true`
+- Filter in queries: `WHERE _peerdb_is_deleted = false` (or omit for append-only tables like event logs)
+- Periodic cleanup: `ALTER TABLE ... DELETE WHERE _peerdb_is_deleted = true` (optional)
 
 ---
 
@@ -136,6 +127,7 @@ practitioner_display String MATERIALIZED
 | `status` | LowCardinality(String) | Processing status |
 | `rejection_reason` | LowCardinality(Nullable(String)) | If rejected |
 | `received_at` | DateTime64(3) | Ingestion timestamp |
+| `updated_at` | DateTime64(3) | Last modification timestamp |
 | `_version` | UInt64 | CDC version (LSN) |
 | `subject` | String (MATERIALIZED) | Patient identifier |
 | `event_type` | String (MATERIALIZED) | CloudEvents type |
@@ -200,6 +192,7 @@ practitioner_display String MATERIALIZED
 | `detected_at` | DateTime64(3) |
 | `intelligence_event_id` | Nullable(UUID) |
 | `metadata` | Nullable(String) |
+| `updated_at` | DateTime64(3) |
 | `_version` | UInt64 |
 
 **Engine:** `ReplacingMergeTree(_version)`  
@@ -225,8 +218,7 @@ Materialized Views in ClickHouse are triggered on INSERT — they read from the 
 
 | MV | Source | Target Engine | Key Metrics |
 |----|--------|---------------|-------------|
-| `mv_event_volume_hourly` | `inbound_event_logs` | SummingMergeTree | `event_count` per hour/facility/source/type |
-| `mv_event_volume_daily` | `inbound_event_logs` | SummingMergeTree | `event_count` per day/facility/source/type |
+| `mv_event_volume_hourly` | `inbound_event_logs` | SummingMergeTree | `event_count` per hour/facility/source/type; daily totals derived via `toDate(hour)` at query time |
 | `mv_facility_summary` | `inbound_event_logs` | AggregatingMergeTree | `uniqState(subject)`, `countState()` per facility/day |
 | `mv_practitioner_summary` | `inbound_event_logs` | AggregatingMergeTree | `uniqState(subject)`, `countState()` per practitioner/day |
 | `mv_compliance_summary` | `protocol_instances` | AggregatingMergeTree | `countIfState(status='COMPLETED')` per protocol/day |
@@ -244,6 +236,8 @@ Materialized Views in ClickHouse are triggered on INSERT — they read from the 
 | `mv_step_states_by_patient` | `step_instances` JOIN `protocol_instances` | AggregatingMergeTree | `countState()` per patient/state/day |
 | `mv_intelligence_by_protocol` | `intelligence_event_logs` | AggregatingMergeTree | `countState()` per protocol_instance_id/action_type/day |
 | `mv_delivery_by_protocol` | `intelligence_deliveries` | AggregatingMergeTree | `countIfState(status)` per protocol_canonical/destination/day |
+| `mv_step_completion_timeliness` | `step_instances` | SummingMergeTree | `step_count` per protocol_instance_id/action_id/completion_status/day |
+| `mv_patient_facility_latest` | `inbound_event_logs` | ReplacingMergeTree(last_seen) | Latest facility per patient (dictionary source) |
 
 ### 4.3 Entity × Behavior Coverage Matrix
 
@@ -258,6 +252,7 @@ Every meaningful Entity × Behavior combination is pre-aggregated or resolvable 
 | **Intelligence Triggers** | `mv_intelligence_by_patient` | via `dict_patient_facility` | n/a | `mv_intelligence_by_protocol` | — | — |
 | **Delivery** | `mv_delivery_by_patient` | via `dict_patient_facility` | n/a | `mv_delivery_by_protocol` | — | — |
 | **Step States** | `mv_step_states_by_patient` | via `dict_patient_facility` | n/a | `mv_step_states_by_protocol` | — | — |
+| **Step Timeliness** | via protocol → patient | via `dict_patient_facility` | n/a | `mv_step_completion_timeliness` | — | — |
 | **Facility Summary** | `mv_facility_summary` (uniq) | `mv_facility_summary` | `mv_facility_summary` (uniq) | — | `mv_facility_summary` | — |
 | **Practitioner Activity** | `mv_practitioner_summary` (uniq) | `mv_practitioner_summary` | `mv_practitioner_summary` | — | `mv_practitioner_summary` | — |
 
@@ -314,6 +309,7 @@ Projections provide alternative sort orders without separate tables:
 | Table | Projection | Order By | Use Case |
 |-------|-----------|----------|----------|
 | `inbound_event_logs` | `prj_patient_timeline` | `(subject, event_time)` | Patient event history |
+| `inbound_event_logs` | `prj_facility_timeline` | `(facility_id, received_at, subject)` | Facility-scoped event queries |
 | `protocol_instances` | `prj_patient_protocols` | `(patient_id, enrolled_at)` | Patient's protocol list |
 | `deviations` | `prj_protocol_deviations` | `(protocol_instance_id, detected_at)` | Protocol drill-down |
 
@@ -427,7 +423,6 @@ flowchart TD
 
     subgraph Materialized Views
         MV1["mv_event_volume_hourly"]
-        MV2["mv_event_volume_daily"]
         MV3["mv_facility_summary"]
         MV4["mv_practitioner_summary"]
         MV5["mv_compliance_summary"]

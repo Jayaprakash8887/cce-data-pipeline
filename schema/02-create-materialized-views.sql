@@ -24,22 +24,6 @@ FROM inbound_event_logs
 WHERE status = 'ACCEPTED'
 GROUP BY hour, facility_id, source, event_type, resource_type;
 
--- Daily rollup from inbound_event_logs
-CREATE MATERIALIZED VIEW IF NOT EXISTS mv_event_volume_daily
-ENGINE = SummingMergeTree()
-PARTITION BY toYYYYMM(day)
-ORDER BY (facility_id, source, event_type, resource_type, day)
-AS SELECT
-    toStartOfDay(received_at) AS day,
-    facility_id,
-    source,
-    event_type,
-    resource_type,
-    count() AS event_count
-FROM inbound_event_logs
-WHERE status = 'ACCEPTED'
-GROUP BY day, facility_id, source, event_type, resource_type;
-
 -- ============================================================
 -- Protocol Compliance
 -- ============================================================
@@ -103,7 +87,7 @@ GROUP BY day, source, status, rejection_reason;
 -- Intelligence (from intelligence_event_logs CDC)
 -- ============================================================
 
--- Intelligence trigger aggregation (from CDC table, replaces Kafka-sourced intelligence_events)
+-- Intelligence trigger aggregation (from intelligence_event_logs CDC table)
 CREATE MATERIALIZED VIEW IF NOT EXISTS mv_intelligence_summary
 ENGINE = AggregatingMergeTree()
 PARTITION BY toYYYYMM(day)
@@ -123,7 +107,7 @@ GROUP BY day, action_type, intelligence_destination, step_state, trigger_reason;
 CREATE MATERIALIZED VIEW IF NOT EXISTS mv_delivery_performance_hourly
 ENGINE = AggregatingMergeTree()
 PARTITION BY toYYYYMM(hour)
-ORDER BY (adaptor_name, destination, action_type, severity, hour)
+ORDER BY (adaptor_name, endpoint_url, destination, action_type, severity, hour)
 AS SELECT
     toStartOfHour(created_at)         AS hour,
     adaptor_name,
@@ -144,7 +128,7 @@ WHERE status IN ('DELIVERED', 'FAILED', 'CANCELLED')
 GROUP BY hour, adaptor_name, endpoint_url, destination, action_type, severity;
 
 -- ============================================================
--- Step/Scheduler (from step_instances CDC, replaces Kafka step_transitions)
+-- Step/Scheduler (from step_instances CDC)
 -- ============================================================
 
 -- Daily step state transitions (from step_instances CDC — state changes captured via ReplacingMergeTree)
@@ -223,19 +207,21 @@ FROM protocol_instances
 GROUP BY patient_id, protocol_definition_id, protocol_canonical;
 
 -- Patient-level deviations (JOIN deviations → protocol_instances for patient_id)
+-- LEFT JOIN: if protocol_instances row hasn't arrived yet via CDC, the deviation is
+-- still captured with a NULL patient_id rather than silently dropped.
 CREATE MATERIALIZED VIEW IF NOT EXISTS mv_deviation_by_patient
 ENGINE = AggregatingMergeTree()
 PARTITION BY toYYYYMM(day)
 ORDER BY (patient_id, deviation_type, day)
 AS SELECT
     toStartOfDay(d.detected_at) AS day,
-    pi.patient_id AS patient_id,
+    coalesce(pi.patient_id, '') AS patient_id,
     d.deviation_type,
     countState() AS deviation_count,
     uniqState(d.protocol_instance_id) AS unique_protocols
 FROM deviations d
-INNER JOIN protocol_instances pi ON d.protocol_instance_id = pi.id
-GROUP BY day, pi.patient_id, d.deviation_type;
+LEFT JOIN protocol_instances pi ON d.protocol_instance_id = pi.id
+GROUP BY day, patient_id, d.deviation_type;
 
 -- Patient-level intelligence actions (enables: intelligence actions per patient per type)
 CREATE MATERIALIZED VIEW IF NOT EXISTS mv_intelligence_by_patient
@@ -285,20 +271,22 @@ FROM step_instances
 GROUP BY day, protocol_instance_id, action_id, state, completion_status;
 
 -- Step states per patient (JOIN step_instances → protocol_instances for patient_id)
+-- LEFT JOIN: if protocol_instances row hasn't arrived yet via CDC, the step is
+-- still captured with a NULL patient_id rather than silently dropped.
 CREATE MATERIALIZED VIEW IF NOT EXISTS mv_step_states_by_patient
 ENGINE = AggregatingMergeTree()
 PARTITION BY toYYYYMM(day)
 ORDER BY (patient_id, state, day)
 AS SELECT
     toStartOfDay(si.updated_at) AS day,
-    pi.patient_id AS patient_id,
+    coalesce(pi.patient_id, '') AS patient_id,
     si.state,
     si.completion_status,
     countState() AS step_count,
     uniqState(si.protocol_instance_id) AS unique_protocols
 FROM step_instances si
-INNER JOIN protocol_instances pi ON si.protocol_instance_id = pi.id
-GROUP BY day, pi.patient_id, si.state, si.completion_status;
+LEFT JOIN protocol_instances pi ON si.protocol_instance_id = pi.id
+GROUP BY day, patient_id, si.state, si.completion_status;
 
 -- Intelligence triggers per protocol (enables: "which protocols generate the most alerts?")
 CREATE MATERIALIZED VIEW IF NOT EXISTS mv_intelligence_by_protocol
@@ -332,3 +320,58 @@ AS SELECT
     uniqState(subject) AS unique_patients
 FROM intelligence_deliveries
 GROUP BY day, protocol_canonical, destination, action_type;
+
+-- ============================================================
+-- Step Completion Timeliness (ON_TIME / LATE / EARLY counts)
+-- ============================================================
+
+-- Step completion timeliness per protocol/action/day
+-- Enables: "Are steps being completed on time? Which protocols have the most late steps?"
+CREATE MATERIALIZED VIEW IF NOT EXISTS mv_step_completion_timeliness
+ENGINE = SummingMergeTree()
+PARTITION BY toYYYYMM(day)
+ORDER BY (protocol_instance_id, action_id, completion_status, day)
+AS SELECT
+    toStartOfDay(updated_at) AS day,
+    protocol_instance_id,
+    action_id,
+    completion_status,
+    count() AS step_count
+FROM step_instances
+WHERE state = 'COMPLETED' AND completion_status != ''
+GROUP BY day, protocol_instance_id, action_id, completion_status;
+
+-- ============================================================
+-- Compliance Event Processing Quality
+-- ============================================================
+
+-- Compliance event processing quality per source/day
+-- Enables: "How many compliance events processed successfully vs failed, by source?"
+CREATE MATERIALIZED VIEW IF NOT EXISTS mv_compliance_processing_quality
+ENGINE = SummingMergeTree()
+PARTITION BY toYYYYMM(day)
+ORDER BY (source, processing_status, day)
+AS SELECT
+    toStartOfDay(received_at) AS day,
+    source,
+    processing_status,
+    count() AS event_count
+FROM compliance_event_logs
+GROUP BY day, source, processing_status;
+
+-- ============================================================
+-- Patient → Facility Latest Mapping (dict source)
+-- ============================================================
+
+-- Bounded MV that tracks patient's latest facility assignment.
+-- Used as the SOURCE for dict_patient_facility instead of a full-table argMax scan.
+-- ReplacingMergeTree(last_seen) keeps only the latest row per patient after merges.
+CREATE MATERIALIZED VIEW IF NOT EXISTS mv_patient_facility_latest
+ENGINE = ReplacingMergeTree(last_seen)
+ORDER BY (patient_id)
+AS SELECT
+    subject AS patient_id,
+    facility_id,
+    received_at AS last_seen
+FROM inbound_event_logs
+WHERE subject != '' AND facility_id != '';

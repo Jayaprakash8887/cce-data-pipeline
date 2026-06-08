@@ -1,5 +1,5 @@
 -- CCE Data Pipeline — PostgreSQL CDC Configuration
--- Task 1.2: Configure logical replication for Debezium CDC
+-- Configure logical replication for PeerDB CDC
 --
 -- Prerequisites:
 --   1. PostgreSQL must have wal_level = 'logical' (requires restart if changing)
@@ -19,9 +19,12 @@ BEGIN
     END IF;
 END $$;
 
--- Step 2: Set max_replication_slots (ensure enough for Debezium)
-ALTER SYSTEM SET max_replication_slots = 4;
-ALTER SYSTEM SET max_wal_senders = 4;
+-- Step 2: Set max_replication_slots (ensure enough for PeerDB + backup slots)
+ALTER SYSTEM SET max_replication_slots = 10;
+ALTER SYSTEM SET max_wal_senders = 10;
+
+-- Prevent unbounded WAL growth if PeerDB falls behind
+ALTER SYSTEM SET max_slot_wal_keep_size = '10GB';
 
 -- Step 3: Create CDC user with minimal privileges
 DO $$
@@ -34,34 +37,51 @@ BEGIN
     END IF;
 END $$;
 
--- Step 4: Grant SELECT on all CDC source tables
+-- Step 4: Grant SELECT on all 11 CDC source tables
 GRANT USAGE ON SCHEMA public TO cce_cdc_user;
 GRANT SELECT ON TABLE
     protocol_definition,
     protocol_instance,
     step_instance,
     deviation,
-    inbound_event,
+    inbound_event_log,
     intelligence_delivery,
     intelligence_event_log,
     action_definition,
     receiver_adaptor,
-    destination_adaptor_mapping
+    destination_adaptor_mapping,
+    compliance_event_log
 TO cce_cdc_user;
 
--- Step 5: Create publication for all 10 CDC tables
+-- Step 5: REPLICA IDENTITY FULL on all 11 tables
+-- Required by PeerDB so UPDATE/DELETE events include the full old-row image.
+-- Without this, only the primary key is available in the WAL for changed rows.
+ALTER TABLE protocol_definition          REPLICA IDENTITY FULL;
+ALTER TABLE protocol_instance            REPLICA IDENTITY FULL;
+ALTER TABLE step_instance                REPLICA IDENTITY FULL;
+ALTER TABLE deviation                    REPLICA IDENTITY FULL;
+ALTER TABLE inbound_event_log            REPLICA IDENTITY FULL;
+ALTER TABLE intelligence_delivery        REPLICA IDENTITY FULL;
+ALTER TABLE intelligence_event_log       REPLICA IDENTITY FULL;
+ALTER TABLE action_definition            REPLICA IDENTITY FULL;
+ALTER TABLE receiver_adaptor             REPLICA IDENTITY FULL;
+ALTER TABLE destination_adaptor_mapping  REPLICA IDENTITY FULL;
+ALTER TABLE compliance_event_log         REPLICA IDENTITY FULL;
+
+-- Step 6: Create publication for all 11 CDC tables
 DROP PUBLICATION IF EXISTS cce_analytics_pub;
 CREATE PUBLICATION cce_analytics_pub FOR TABLE
     protocol_definition,
     protocol_instance,
     step_instance,
     deviation,
-    inbound_event,
+    inbound_event_log,
     intelligence_delivery,
     intelligence_event_log,
     action_definition,
     receiver_adaptor,
-    destination_adaptor_mapping;
+    destination_adaptor_mapping,
+    compliance_event_log;
 
--- Step 6: Grant replication privileges
+-- Step 7: Confirm replication role
 ALTER ROLE cce_cdc_user WITH REPLICATION;

@@ -22,8 +22,7 @@
         <asynchronous_metrics>true</asynchronous_metrics>
     </prometheus>
 
-    <async_insert>1</async_insert>
-    <wait_for_async_insert>0</wait_for_async_insert>
-    <async_insert_max_data_size>10485760</async_insert_max_data_size>
-    <async_insert_busy_timeout_ms>5000</async_insert_busy_timeout_ms>
+    <!-- PeerDB handles its own batching; server-level async inserts with
+         wait_for_async_insert=0 risk data loss on crash with no throughput benefit. -->
+    <async_insert>0</async_insert>
 </clickhouse>

@@ -34,8 +34,9 @@ DB_RESPONSE=$(curl -sf -X POST "${SUPERSET_URL}/api/v1/database/" \
 DB_ID=$(echo "$DB_RESPONSE" | python3 -c "import sys,json; print(json.load(sys.stdin).get('id', 1))")
 echo "  Database ID: ${DB_ID}"
 
-# Register datasets (tables + MVs)
+# Register all datasets — base tables + all MVs
 DATASETS=(
+    # CDC base tables
     "protocol_instances"
     "step_instances"
     "deviations"
@@ -47,21 +48,38 @@ DATASETS=(
     "receiver_adaptors"
     "destination_adaptor_mappings"
     "compliance_event_logs"
+    # Event volume
     "mv_event_volume_hourly"
-    "mv_event_volume_daily"
+    # Compliance
     "mv_compliance_summary"
+    "mv_compliance_by_patient"
+    "mv_compliance_processing_quality"
+    # Deviations
     "mv_deviation_trends"
-    "mv_ingestion_quality"
     "mv_deviation_by_protocol"
+    "mv_deviation_by_patient"
+    # Ingestion quality
+    "mv_ingestion_quality"
+    # Intelligence
     "mv_intelligence_summary"
+    "mv_intelligence_by_patient"
+    "mv_intelligence_by_protocol"
+    # Deliveries
     "mv_delivery_performance_hourly"
+    "mv_delivery_by_patient"
+    "mv_delivery_by_protocol"
+    # Steps / Scheduler
     "mv_step_states_daily"
+    "mv_step_states_by_protocol"
+    "mv_step_states_by_patient"
+    "mv_step_completion_timeliness"
+    # Practitioners / Facilities
     "mv_practitioner_summary"
     "mv_facility_summary"
 )
 
 echo ""
-echo "--- Registering Datasets ---"
+echo "--- Registering Datasets (${#DATASETS[@]} total) ---"
 for dataset in "${DATASETS[@]}"; do
     PAYLOAD="{\"database\": ${DB_ID}, \"schema\": \"\", \"table_name\": \"${dataset}\"}"
     HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" -X POST \
@@ -75,21 +93,23 @@ for dataset in "${DATASETS[@]}"; do
     fi
 done
 
-# Configure Row-Level Security
+# Configure Row-Level Security via Superset Admin UI
+# Dataset table IDs are auto-assigned on each deployment — do NOT hardcode them.
+# Instead, apply RLS via the Superset Admin UI:
+#   Security → Row Level Security → + Rule
+#   Name:        Facility-based data isolation
+#   Filter Type: Regular
+#   Tables:      inbound_event_logs, protocol_instances, deviations,
+#                mv_event_volume_hourly, mv_compliance_summary, mv_facility_summary
+#   Roles:       Gamma
+#   Clause:      facility_id = '{{ current_user().extra_attributes.facility_id }}'
 echo ""
-echo "--- Configuring Row-Level Security ---"
-RLS_PAYLOAD='{
-  "name": "Facility-based data isolation",
-  "filter_type": "Regular",
-  "tables": [
-    {"id": 4, "table_name": "inbound_event_logs"},
-    {"id": 1, "table_name": "protocol_instances"},
-    {"id": 3, "table_name": "deviations"}
-  ],
-  "roles": [{"id": 4, "name": "Gamma"}],
-  "clause": "facility_id = '\''{{ current_user().extra_attributes.facility_id }}'\''"
-}'
-echo "  RLS rule: facility_id filtering for Gamma role"
-echo "  (Configure via Superset Admin → Row Level Security)"
+echo "--- Row-Level Security ---"
+echo "  RLS must be configured via the Superset Admin UI (dataset IDs are dynamic)."
+echo "  Security → Row Level Security → + Rule"
+echo "  Tables:  inbound_event_logs, protocol_instances, deviations, facility MVs"
+echo "  Roles:   Gamma"
+echo "  Clause:  facility_id = '{{ current_user().extra_attributes.facility_id }}'"
+
 echo ""
 echo "=== Dataset Setup Complete ==="

@@ -13,7 +13,7 @@ graph TB
     end
 
     subgraph Pipeline["CCE Data Pipeline"]
-        DEBEZIUM["Debezium CDC<br/>(Kafka Connect)"]
+        PEERDB["PeerDB<br/>(WAL Replication)"]
         CLICKHOUSE["ClickHouse<br/>(OLAP Analytics Store)"]
         SUPERSET["Apache Superset<br/>(Dashboards & Visualization)"]
     end
@@ -29,8 +29,8 @@ graph TB
     SCHEDULER --> PG
     INTELLIGENCE --> PG
 
-    PG -->|"CDC (WAL)"| DEBEZIUM
-    DEBEZIUM -->|"Kafka → ClickHouse Sink"| CLICKHOUSE
+    PG -->|"CDC (WAL)"| PEERDB
+    PEERDB -->|"Direct WAL replication"| CLICKHOUSE
     CLICKHOUSE --> SUPERSET
 
     SUPERSET --> OPS
@@ -42,7 +42,7 @@ graph TB
     classDef users fill:#27AE60,stroke:#1E8449,color:white
 
     class COLLECTOR,COMPLIANCE,SCHEDULER,INTELLIGENCE,PG existing
-    class DEBEZIUM,CLICKHOUSE,SUPERSET pipeline
+    class PEERDB,CLICKHOUSE,SUPERSET pipeline
     class OPS,CLINICAL,ADMIN users
 ```
 
@@ -55,7 +55,7 @@ graph TB
 | # | Principle | Rationale |
 |---|-----------|-----------|
 | 1 | **Open-source only** | No vendor lock-in; community support; cost-effective |
-| 2 | **CDC-only (committed data)** | Analytics based solely on data committed to PostgreSQL — eliminates discrepancies from in-flight Kafka events that may be rejected or reprocessed |
+| 2 | **CDC-only (committed data)** | Analytics based solely on data committed to PostgreSQL — eliminates discrepancies from in-flight transactions that may be rolled back |
 | 3 | **No custom stream processing** | ClickHouse MATERIALIZED columns + Materialized Views replace Flink — fewer moving parts, less operational burden |
 | 4 | **Schema-on-read flexibility** | ClickHouse's JSON functions handle evolving FHIR payloads without migrations; `raw_payload` preserved for future extraction |
 | 5 | **Immutable append-only** | All analytics data captured via CDC; ReplacingMergeTree handles updates idempotently |
@@ -70,9 +70,7 @@ graph TB
 
 | Layer | Technology | Version | License | Purpose |
 |-------|-----------|---------|---------|---------|
-| Change Data Capture | Debezium (PostgreSQL) | 2.6.1 | Apache 2.0 | WAL-based CDC from PostgreSQL |
-| CDC Transport | Kafka Connect | 3.7+ | Apache 2.0 | Connector runtime for Debezium + ClickHouse sink |
-| CDC Sink | ClickHouse Kafka Connect | 0.14.0 | Apache 2.0 | Write CDC records to ClickHouse |
+| Change Data Capture | PeerDB | 0.18+ | Apache 2.0 | Direct WAL replication from PostgreSQL to ClickHouse |
 | Analytics Database | ClickHouse | 24.8 LTS | Apache 2.0 | Columnar OLAP with MATERIALIZED columns + MVs |
 | Visualization | Apache Superset | 4.0.2 | Apache 2.0 | Interactive dashboards & scheduled reports |
 | Operational Monitoring | Grafana | 11.x | AGPL 3.0 | Infrastructure & pipeline health monitoring |
@@ -85,13 +83,11 @@ graph TB
 
 | Component | Minimum Version | Tested Version | Notes |
 |-----------|----------------|----------------|-------|
-| Debezium | 2.4 | 2.6.1 | PostgreSQL connector |
-| Kafka Connect | 3.5 | 3.7.1 | Bundled with Kafka |
-| ClickHouse Sink Connector | 0.12 | 0.14.0 | `clickhouse-kafka-connect` |
+| PeerDB | 0.18 | latest | OSS self-hosted |
 | ClickHouse | 23.8 LTS | 24.8 LTS | LTS release recommended |
 | Apache Superset | 3.0 | 4.0.2 | With ClickHouse driver |
 | Grafana | 10.0 | 11.2 | With ClickHouse plugin |
-| PostgreSQL (source) | 14 | 16 | Existing CCE database |
+| PostgreSQL (source) | 14 | 16 | Existing CCE database (`ccedb`) |
 | Redis | 6.0 | 7.x | Superset cache |
 | Prometheus | 2.45 | 2.53 | Metrics collection |
 
@@ -116,26 +112,45 @@ graph TB
 | Custom React app | Defeats purpose of open-source stack |
 | **Apache Superset** | ✅ Full BI platform; SQL Lab; RBAC; scheduled reports; ClickHouse native connector; embeddable |
 
+#### Why PeerDB (not Debezium + Kafka or ClickHouse MaterializedPostgreSQL)?
+
+| Alternative | Why Not |
+|-------------|--------|
+| **ClickHouse MaterializedPostgreSQL** | Experimental; TOAST values not replicated (our JSONB columns are 5-100 KB); no schema control (no custom ORDER BY, MATERIALIZED columns, CODEC); DDL changes require full re-snapshot; not supported in ClickHouse Cloud |
+| **Debezium + Kafka + ClickHouse Sink** | 3 components to operate (Debezium, Kafka, Sink Connector); requires Kafka cluster; higher operational complexity; slower initial snapshots (single-threaded) |
+| **PeerDB** | ✅ Single binary; native TOAST support; ~10 sec latency; parallelized initial load; schema evolution via replication messages; MATERIALIZED columns added post-creation via ALTER TABLE; simpler operations (no Kafka cluster) |
+
+**Trade-offs accepted with PeerDB:**
+- No Kafka buffer — PeerDB stalling means WAL growth on PostgreSQL (mitigated by `max_slot_wal_keep_size=10GB` and WAL monitoring alerts)
+- No DLQ — replication errors require investigation at the PeerDB level
+- No multi-consumer CDC topics — other services cannot tap into a Kafka topic (acceptable: no downstream consumers needed)
+- Table ORDER BY determined by PostgreSQL primary keys — mitigated by projections for common access patterns
+
 ---
 
 ## 4. Component Architecture
 
-### 4.1 CDC Layer (Debezium + ClickHouse Kafka Connect Sink)
+### 4.1 CDC Layer (PeerDB)
 
-**Debezium 2.6.1** captures PostgreSQL WAL changes and publishes them to Kafka topics. **ClickHouse Kafka Connect Sink 0.14.0** consumes those topics and writes directly to ClickHouse tables using `ReplacingMergeTree` for idempotent upserts.
+**PeerDB** connects directly to PostgreSQL's logical replication stream and writes to ClickHouse using an intermediary S3/MinIO stage for performance. It creates `ReplacingMergeTree(_peerdb_version)` tables automatically with columns mirroring the PostgreSQL source.
 
-All 11 CDC tables reside in the shared `ccedb` PostgreSQL database. One Debezium source connector captures all tables. For the full table listing, CDC topics, and schema details, see [Data Flow & Schema Design](data-flow.md).
+All 11 CDC tables reside in the shared `ccedb` PostgreSQL database. A single PeerDB mirror replicates all tables. After mirror creation, MATERIALIZED columns are added via `ALTER TABLE` for zero-cost JSON extraction. For the full table listing, mirror config, and schema details, see [Data Flow & Schema Design](data-flow.md).
+
+**PeerDB metadata columns** (added automatically to all tables):
+- `_peerdb_synced_at` — timestamp of sync to ClickHouse
+- `_peerdb_is_deleted` — soft-delete marker (true = row deleted in PostgreSQL)
+- `_peerdb_version` — version for ReplacingMergeTree deduplication
 
 ### 4.2 Analytics Storage Layer (ClickHouse)
 
 **Key features leveraged:**
-- **ReplacingMergeTree** — CDC-compatible engine with `_version` for idempotent upserts
+- **ReplacingMergeTree** — CDC-compatible engine with `_peerdb_version` for idempotent upserts
 - **MATERIALIZED columns** — Extract JSON fields from `raw_payload` at insert time (zero query cost)
-- **Materialized Views** — Real-time pre-aggregation triggered on INSERT (19 MVs total)
+- **Materialized Views** — Real-time pre-aggregation triggered on INSERT (22 MVs total)
 - **AggregatingMergeTree** — Correct incremental aggregation with `-State`/`-Merge` combinators
 - **SummingMergeTree** — Simple additive rollups (counts per hour/day)
 - **Dictionaries** — Fast key-value lookups replacing JOINs (3 dictionaries)
-- **Projections** — Alternative sort orders for common access patterns
+- **Projections** — Alternative sort orders for common access patterns (4 projections)
 - **CODEC compression** — LZ4/ZSTD for 10-40x compression on event data
 - **TTL** — Automatic data lifecycle management
 
@@ -155,12 +170,12 @@ For dashboard wireframes and SQL queries, see [Dashboard Design](dashboard-desig
 ### 4.4 Operational Monitoring (Grafana + Prometheus)
 
 **Grafana** monitors the health of the data pipeline itself (not clinical analytics):
-- CDC sink connector health (throughput, errors, lag)
+- PeerDB mirror health (throughput, errors, replication lag)
 - ClickHouse insert rate and query performance (p95, p99)
 - End-to-end latency (PostgreSQL commit → ClickHouse insert)
-- Kafka Connect worker status
+- PostgreSQL WAL replication slot lag
 
-**Prometheus** scrapes metrics from Kafka Connect (JMX) and ClickHouse (port 9363).
+**Prometheus** scrapes metrics from PeerDB (port 2112) and ClickHouse (port 9363).
 
 ---
 
@@ -168,23 +183,20 @@ For dashboard wireframes and SQL queries, see [Dashboard Design](dashboard-desig
 
 ```mermaid
 flowchart TD
-    PG["PostgreSQL (existing)"] --> DEBEZIUM["Debezium<br/>(Kafka Connect)"]
-    DEBEZIUM -->|"CDC Topics"| SINK["ClickHouse Sink<br/>(Kafka Connect)"]
-    SINK --> CLICKHOUSE["ClickHouse"]
+    PG["PostgreSQL (existing)"] -->|"Logical replication (WAL)"| PEERDB["PeerDB"]
+    PEERDB -->|"Direct insert"| CLICKHOUSE["ClickHouse"]
 
     CLICKHOUSE --> SUPERSET["Apache Superset"]
     CLICKHOUSE --> GRAFANA["Grafana"]
 
     KEYCLOAK["Keycloak (existing)"] --> SUPERSET
     PROMETHEUS["Prometheus"] --> GRAFANA
-    DEBEZIUM -.->|"metrics"| PROMETHEUS
-    SINK -.->|"metrics"| PROMETHEUS
+    PEERDB -.->|"metrics"| PROMETHEUS
     CLICKHOUSE -.->|"metrics"| PROMETHEUS
 
     style PG fill:#27AE60,stroke:#1E8449,color:white
     style KEYCLOAK fill:#27AE60,stroke:#1E8449,color:white
-    style DEBEZIUM fill:#4A90D9,stroke:#2C5F8A,color:white
-    style SINK fill:#4A90D9,stroke:#2C5F8A,color:white
+    style PEERDB fill:#4A90D9,stroke:#2C5F8A,color:white
     style CLICKHOUSE fill:#4A90D9,stroke:#2C5F8A,color:white
     style SUPERSET fill:#9B59B6,stroke:#8E44AD,color:white
     style GRAFANA fill:#9B59B6,stroke:#8E44AD,color:white
@@ -206,7 +218,7 @@ flowchart TD
 | **Intelligence & Triggers** | Trigger volume by action type, destination, reason | `intelligence_event_logs` → `mv_intelligence_summary`, `mv_intelligence_by_patient/protocol` |
 | **Delivery Performance** | Success rate, latency, errors per adaptor/protocol | `intelligence_deliveries` → `mv_delivery_performance_hourly`, `mv_delivery_by_patient/protocol` |
 | **Step/Scheduler** | Step states, completions, protocol progress | `step_instances` → `mv_step_states_daily`, `mv_step_states_by_protocol/patient` |
-| **Pipeline Health** | CDC lag, connector status | Kafka Connect metrics + Grafana |
+| **Pipeline Health** | CDC lag, mirror status | PeerDB metrics + Grafana |
 
 ---
 
@@ -241,26 +253,26 @@ flowchart TD
 
 | Component | Containers | CPU | RAM | Storage |
 |-----------|-----------|-----|-----|---------|
-| Kafka Connect (Source + Sink) | 1 | 1 core | 2 GB | — |
+| PeerDB | 1 | 0.5 core | 512 MB | — |
 | ClickHouse | 1 | 4 cores | 16 GB | 100 GB SSD |
 | Superset (web + worker) | 1 | 2 cores | 4 GB | — |
 | Redis (Superset cache) | 1 | 0.5 core | 1 GB | — |
 | Prometheus | 1 | 0.5 core | 1 GB | 10 GB |
 | Grafana | 1 | 0.5 core | 512 MB | — |
-| **Total** | **6** | **8.5 cores** | **24.5 GB** | **110 GB** |
+| **Total** | **6** | **8 cores** | **23 GB** | **110 GB** |
 
 #### Production (600k events/day)
 
 | Component | Containers | CPU | RAM | Storage |
 |-----------|-----------|-----|-----|---------|
-| Kafka Connect (Source + Sink) | 2 (HA) | 2 cores | 4 GB | — |
+| PeerDB | 1 | 1 core | 1 GB | — |
 | ClickHouse | 1 | 8 cores | 32 GB | 500 GB SSD |
 | Superset (web) | 2 (HA) | 4 cores | 8 GB | — |
 | Superset (worker) | 2 | 2 cores | 4 GB | — |
 | Redis (Superset) | 1 | 1 core | 2 GB | — |
 | Prometheus | 1 | 2 cores | 4 GB | 50 GB |
 | Grafana | 1 | 1 core | 1 GB | — |
-| **Total** | **10** | **20 cores** | **55 GB** | **550 GB** |
+| **Total** | **9** | **19 cores** | **52 GB** | **550 GB** |
 
 > **Scale-out path:** ClickHouse supports sharding + replication for horizontal scaling. At 600k events/day, a single node is more than sufficient. Scale to a cluster when daily volume exceeds 10M events.
 
@@ -270,12 +282,12 @@ flowchart TD
 
 | Concern | Mechanism |
 |---------|-----------|
-| **Network isolation** | Data pipeline in dedicated network segment; Kafka access via internal network only |
-| **Authentication** | Superset: OAuth2/OIDC (Keycloak); ClickHouse: native user/password |
+| **Network isolation** | Data pipeline in dedicated network segment; PeerDB access via internal network only |
+| **Authentication** | Superset: OAuth2/OIDC (Keycloak); ClickHouse: native user/password; PeerDB: password-protected catalog |
 | **Authorization** | Superset RBAC: roles mapped to facility/program access; Row-level security for multi-tenant |
-| **Data in transit** | TLS for all inter-component communication (Kafka SSL, ClickHouse TLS, HTTPS for Superset) |
+| **Data in transit** | TLS for all inter-component communication (ClickHouse TLS, HTTPS for Superset, PeerDB TLS) |
 | **Data at rest** | ClickHouse disk encryption; sensitive fields accessible only to authorized roles |
-| **Audit** | Superset audit log; ClickHouse query log; Kafka Connect connector status |
+| **Audit** | Superset audit log; ClickHouse query log; PeerDB mirror status and sync history |
 | **PII handling** | Patient UPIDs are pseudonymized identifiers (not names); FHIR resources stored for operational analytics only |
 
 ---
@@ -284,11 +296,10 @@ flowchart TD
 
 | Failure | Impact | Recovery |
 |---------|--------|----------|
-| ClickHouse down | Dashboards unavailable; CDC buffered in Kafka | Kafka retains CDC events (retention = 7 days); replay on recovery |
-| Kafka Connect (Debezium) failure | CDC tables go stale | Connector auto-restart; snapshot recovery on extended outage |
-| Kafka Connect (Sink) failure | New data not landing in ClickHouse | Auto-restart; replay from Kafka offsets |
+| ClickHouse down | Dashboards unavailable; PeerDB buffers pending rows | PeerDB retries on recovery; WAL retained by replication slot |
+| PeerDB failure | CDC tables go stale; WAL grows on PostgreSQL | PeerDB auto-resumes from replication slot; `max_slot_wal_keep_size=10GB` prevents unbounded growth |
 | Superset down | Dashboards unavailable | No data impact; restart and reconnect |
-| Kafka cluster down | All CCE services affected (existing risk) | CDC pauses; resumes on recovery |
+| PostgreSQL replication slot dropped | Full re-snapshot required | Recreate mirror via `connectors/peerdb-mirror.sql`; PeerDB performs parallelized initial load |
 
 **Key invariant:** The data pipeline is a **read-only observer**. Its failure never impacts CCE operational services.
 
@@ -298,12 +309,12 @@ flowchart TD
 |-----------|----------|-----|-----|
 | ClickHouse | Daily backup to object storage (`clickhouse-backup`) | 24 hours | 1 hour |
 | Superset (metadata DB) | PostgreSQL backup (dashboards, users, permissions) | 24 hours | 30 min |
-| Kafka Connect | Offsets stored in Kafka; re-snapshot on recovery | 0 (replay) | 5 min |
+| PeerDB | Catalog backed up with PostgreSQL; WAL slot preserves replay position | 0 (resume from slot) | 5 min |
 
 ### Upgrades
 
 - **ClickHouse:** Rolling restart for minor versions; backup before major versions
-- **Kafka Connect / Debezium:** Rolling restart; connectors resume from stored offsets
+- **PeerDB:** Restart; mirror resumes from replication slot position automatically
 - **Superset:** Blue-green deployment (stateless; metadata in PostgreSQL)
 
 ---
@@ -312,7 +323,7 @@ flowchart TD
 
 | Phase | Duration | Activities |
 |-------|----------|------------|
-| **Phase 1: Foundation** | 2 weeks | Deploy ClickHouse, Kafka Connect (Debezium + Sink), CDC tables |
+| **Phase 1: Foundation** | 2 weeks | Deploy ClickHouse, PeerDB, create mirror, CDC tables |
 | **Phase 2: Materialized Views** | 1 week | Configure MVs for all analytics domains |
 | **Phase 3: Dashboards** | 2 weeks | Configure Superset, build core dashboards |
 | **Phase 4: Validation** | 1 week | Run parallel with existing insights-service; validate data accuracy |
@@ -330,8 +341,8 @@ The pipeline is designed for forward-compatible evolution without downtime:
 |--------|--------|-----------------|
 | New FHIR field needed in analytics | None (raw_payload preserved) | `ALTER TABLE ADD COLUMN ... MATERIALIZED` on `inbound_event_logs` |
 | New FHIR resource type | Auto-captured (LowCardinality String) | Update dashboard filters |
-| PostgreSQL table gains a column | Debezium auto-captures | `ALTER TABLE ADD COLUMN` on ClickHouse side |
-| PostgreSQL table dropped/renamed | Debezium connector errors | Reconfigure connector `table.include.list` |
-| New PostgreSQL table needed | Add CDC capture | Add to Debezium config + create ClickHouse table + optional MV |
+| PostgreSQL table gains a column | PeerDB auto-captures via replication messages | `ALTER TABLE ADD COLUMN` on ClickHouse side |
+| PostgreSQL table dropped/renamed | PeerDB mirror errors on missing table | Update mirror `TABLE MAPPING` in `connectors/peerdb-mirror.sql` |
+| New PostgreSQL table needed | Add CDC capture | Add table to mirror mapping + create ClickHouse table + optional MV |
 
 **Key invariant:** The `raw_payload` column in `inbound_event_logs` stores the full CloudEvent (including FHIR resource) as-is. Any new field extraction is a non-breaking addition — historical data can always be backfilled from `raw_payload` using ClickHouse's JSON functions.

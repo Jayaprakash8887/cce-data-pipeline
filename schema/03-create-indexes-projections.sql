@@ -44,7 +44,14 @@ ALTER TABLE deviations ADD PROJECTION IF NOT EXISTS prj_protocol_deviations (
     ORDER BY (protocol_instance_id, deviation_type, detected_at)
 );
 
+-- Facility timeline: sorted by facility for fast facility-scoped event queries
+ALTER TABLE inbound_event_logs ADD PROJECTION IF NOT EXISTS prj_facility_timeline (
+    SELECT *
+    ORDER BY (facility_id, received_at, subject)
+);
+
 -- Materialize existing projections for data already inserted
 ALTER TABLE inbound_event_logs MATERIALIZE PROJECTION prj_patient_timeline;
+ALTER TABLE inbound_event_logs MATERIALIZE PROJECTION prj_facility_timeline;
 ALTER TABLE protocol_instances MATERIALIZE PROJECTION prj_protocol_lookup;
 ALTER TABLE deviations MATERIALIZE PROJECTION prj_protocol_deviations;

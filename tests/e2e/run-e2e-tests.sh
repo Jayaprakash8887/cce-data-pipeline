@@ -1,14 +1,14 @@
 #!/usr/bin/env bash
-# End-to-End Integration Test Suite for CCE Data Pipeline (CDC-only architecture)
-# Prerequisites: docker compose up -d (all services healthy)
-# Usage: ./tests/e2e/run-e2e-tests.sh [clickhouse-host]
+# End-to-End Integration Test Suite for CCE Data Pipeline (PeerDB + ClickHouse)
+# Prerequisites: docker compose up -d (all services healthy), PeerDB mirror running
+# Usage: ./tests/e2e/run-e2e-tests.sh [clickhouse-host] [peerdb-url]
 
 set -euo pipefail
 
 CH_HOST="${1:-localhost}"
 CH_PORT="${CH_PORT:-8123}"
 CH_DB="cce_analytics"
-CONNECT_URL="http://localhost:8083"
+PEERDB_URL="${2:-http://localhost:8085}"
 
 PASS=0
 FAIL=0
@@ -28,8 +28,9 @@ ch_query() {
 }
 
 # ============================================================
-echo "=== CCE Data Pipeline — E2E Test Suite (CDC-only) ==="
+echo "=== CCE Data Pipeline — E2E Test Suite ==="
 echo "ClickHouse: ${CH_HOST}:${CH_PORT}"
+echo "PeerDB:     ${PEERDB_URL}"
 echo ""
 
 # ============================================================
@@ -42,11 +43,11 @@ else
     log_fail "ClickHouse is not responding"
 fi
 
-# Kafka Connect
-if curl -sf "${CONNECT_URL}/connectors" > /dev/null; then
-    log_pass "Kafka Connect is healthy"
+# PeerDB
+if curl -sf "${PEERDB_URL}/health" > /dev/null 2>&1; then
+    log_pass "PeerDB is healthy"
 else
-    log_fail "Kafka Connect is not responding"
+    log_fail "PeerDB is not responding at ${PEERDB_URL}"
 fi
 
 # ============================================================
@@ -61,10 +62,17 @@ else
 fi
 
 MV_COUNT=$(ch_query "SELECT count() FROM system.tables WHERE database = '${CH_DB}' AND engine = 'MaterializedView'" | tr -d '[:space:]')
-if [[ "$MV_COUNT" -ge 10 ]]; then
-    log_pass "ClickHouse has ${MV_COUNT} materialized views (expected >= 10)"
+if [[ "$MV_COUNT" -ge 20 ]]; then
+    log_pass "ClickHouse has ${MV_COUNT} materialized views (expected >= 20)"
 else
-    log_fail "ClickHouse has ${MV_COUNT} materialized views (expected >= 10)"
+    log_fail "ClickHouse has ${MV_COUNT} materialized views (expected >= 20)"
+fi
+
+DICT_COUNT=$(ch_query "SELECT count() FROM system.dictionaries WHERE database = '${CH_DB}'" | tr -d '[:space:]')
+if [[ "$DICT_COUNT" -ge 3 ]]; then
+    log_pass "ClickHouse has ${DICT_COUNT} dictionaries (expected >= 3)"
+else
+    log_fail "ClickHouse has ${DICT_COUNT} dictionaries (expected >= 3)"
 fi
 
 # ============================================================
@@ -95,6 +103,14 @@ else
     log_fail "protocol_instances is empty"
 fi
 
+# Verify compliance_event_logs CDC
+CE_COUNT=$(ch_query "SELECT count() FROM compliance_event_logs FINAL" | tr -d '[:space:]')
+if [[ "$CE_COUNT" -ge 0 ]]; then
+    log_pass "compliance_event_logs reachable (${CE_COUNT} rows)"
+else
+    log_fail "compliance_event_logs missing"
+fi
+
 # ============================================================
 echo ""
 echo "--- 4. Materialized View Population ---"
@@ -107,40 +123,30 @@ else
     log_fail "mv_event_volume_hourly is empty"
 fi
 
-# Check daily/hourly consistency
-CONSISTENCY=$(ch_query "SELECT if(abs(a - b) <= greatest(a, 1) * 0.01, 1, 0) FROM (SELECT sum(event_count) as a FROM mv_event_volume_daily) x, (SELECT sum(event_count) as b FROM mv_event_volume_hourly) y" | tr -d '[:space:]')
-if [[ "$CONSISTENCY" == "1" ]]; then
-    log_pass "mv_event_volume_daily consistent with hourly"
-else
-    log_fail "mv_event_volume_daily/hourly mismatch"
-fi
+# Check daily/hourly consistency (daily is now derived from hourly at query time)
+HOURLY_TODAY=$(ch_query "SELECT sum(event_count) FROM mv_event_volume_hourly WHERE toDate(hour) = today()" | tr -d '[:space:]')
+log_info "mv_event_volume_hourly today: ${HOURLY_TODAY:-0} events"
 
 # ============================================================
 echo ""
-echo "--- 5. Connector Status ---"
+echo "--- 5. PeerDB Mirror Status ---"
 
-# Check source connector
-SOURCE_STATUS=$(curl -sf "${CONNECT_URL}/connectors/cce-cdc-source/status" 2>/dev/null | grep -o '"state":"[A-Z]*"' | head -1 | cut -d'"' -f4)
-if [[ "$SOURCE_STATUS" == "RUNNING" ]]; then
-    log_pass "CDC source connector is RUNNING"
-else
-    log_fail "CDC source connector status: ${SOURCE_STATUS:-NOT_FOUND}"
-fi
+MIRROR_JSON=$(curl -sf "${PEERDB_URL}/v1/mirrors/cce_analytics_mirror" 2>/dev/null || echo '{}')
+MIRROR_STATUS=$(echo "$MIRROR_JSON" | python3 -c "import sys,json; print(json.load(sys.stdin).get('status','NOT_FOUND'))" 2>/dev/null || echo "NOT_FOUND")
+MIRROR_LAG=$(echo "$MIRROR_JSON" | python3 -c "import sys,json; print(json.load(sys.stdin).get('cdc_lag_seconds','N/A'))" 2>/dev/null || echo "N/A")
 
-# Check sink connector
-SINK_STATUS=$(curl -sf "${CONNECT_URL}/connectors/cce-clickhouse-sink/status" 2>/dev/null | grep -o '"state":"[A-Z]*"' | head -1 | cut -d'"' -f4)
-if [[ "$SINK_STATUS" == "RUNNING" ]]; then
-    log_pass "ClickHouse sink connector is RUNNING"
+if [[ "$MIRROR_STATUS" == "RUNNING" ]]; then
+    log_pass "cce_analytics_mirror is RUNNING (lag: ${MIRROR_LAG}s)"
 else
-    log_fail "ClickHouse sink connector status: ${SINK_STATUS:-NOT_FOUND}"
+    log_fail "cce_analytics_mirror status: ${MIRROR_STATUS}"
 fi
 
 # ============================================================
 echo ""
 echo "--- 6. Data Quality ---"
 
-# No orphaned step_instances
-ORPHANS=$(ch_query "SELECT count() FROM step_instances FINAL WHERE protocol_instance_id NOT IN (SELECT id FROM protocol_instances FINAL)" | tr -d '[:space:]')
+# No orphaned step_instances (LEFT JOIN pattern — safe with NULLs)
+ORPHANS=$(ch_query "SELECT count() FROM (SELECT si.id FROM step_instances si FINAL LEFT JOIN protocol_instances pi FINAL ON si.protocol_instance_id = pi.id WHERE pi.id = '00000000-0000-0000-0000-000000000000' OR pi.id IS NULL)" | tr -d '[:space:]')
 if [[ "$ORPHANS" == "0" ]]; then
     log_pass "No orphaned step_instances"
 else

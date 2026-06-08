@@ -7,29 +7,29 @@
   "links": [],
   "panels": [
     {
-      "title": "Kafka Consumer Lag by Topic",
+      "title": "PeerDB CDC Lag (seconds)",
       "type": "timeseries",
       "gridPos": { "h": 8, "w": 12, "x": 0, "y": 0 },
       "datasource": "Prometheus",
       "targets": [
         {
-          "expr": "sum(kafka_consumer_group_lag{group=~\"cce-.*\"}) by (topic)",
-          "legendFormat": "{{topic}}"
+          "expr": "peerdb_cdc_lag_seconds{flow_name=~\"cce_.*\"}",
+          "legendFormat": "{{flow_name}}"
         }
       ],
       "fieldConfig": {
-        "defaults": { "unit": "short" }
+        "defaults": { "unit": "s" }
       }
     },
     {
-      "title": "Kafka Connect Sink Throughput",
+      "title": "PeerDB Rows Synced/sec",
       "type": "timeseries",
       "gridPos": { "h": 8, "w": 12, "x": 12, "y": 0 },
       "datasource": "Prometheus",
       "targets": [
         {
-          "expr": "sum(rate(kafka_connect_sink_connector_sink_record_send_total{connector=~\"cce-.*\"}[5m])) by (connector)",
-          "legendFormat": "{{connector}}"
+          "expr": "rate(peerdb_rows_synced_total{flow_name=~\"cce_.*\"}[5m])",
+          "legendFormat": "{{flow_name}}"
         }
       ],
       "fieldConfig": {
@@ -37,18 +37,22 @@
       }
     },
     {
-      "title": "CDC Connector Lag (records)",
-      "type": "timeseries",
+      "title": "PeerDB Mirror Status",
+      "type": "stat",
       "gridPos": { "h": 8, "w": 12, "x": 0, "y": 8 },
       "datasource": "Prometheus",
       "targets": [
         {
-          "expr": "sum(kafka_consumer_group_lag{group=\"cce-data-pipeline-connect\"}) by (topic)",
-          "legendFormat": "{{topic}}"
+          "expr": "peerdb_flow_status{flow_name=~\"cce_.*\"}",
+          "legendFormat": "{{flow_name}}"
         }
       ],
       "fieldConfig": {
-        "defaults": { "unit": "short" }
+        "defaults": {
+          "mappings": [
+            { "options": { "0": { "text": "ERROR", "color": "red" }, "1": { "text": "RUNNING", "color": "green" }, "2": { "text": "PAUSED", "color": "yellow" } }, "type": "value" }
+          ]
+        }
       }
     },
     {
@@ -142,17 +146,20 @@
       }
     },
     {
-      "title": "Kafka Connect Connector Status",
-      "type": "table",
+      "title": "PeerDB Sync Errors",
+      "type": "timeseries",
       "gridPos": { "h": 6, "w": 24, "x": 0, "y": 28 },
       "datasource": "Prometheus",
       "targets": [
         {
-          "expr": "kafka_connect_connector_status{connector=~\"cce-.*\"}",
-          "format": "table",
-          "instant": true
+          "expr": "increase(peerdb_sync_errors_total{flow_name=~\"cce_.*\"}[5m])",
+          "legendFormat": "{{flow_name}}",
+          "format": "time_series"
         }
-      ]
+      ],
+      "fieldConfig": {
+        "defaults": { "unit": "short", "color": { "mode": "fixed", "fixedColor": "red" } }
+      }
     }
   ],
   "refresh": "30s",
