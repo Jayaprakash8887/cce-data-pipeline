@@ -20,7 +20,9 @@ WHERE hour >= toStartOfHour(now() - INTERVAL 7 DAY)
 GROUP BY resource_type
 ORDER BY event_count DESC;
 
--- Chart: Ingestion Funnel (RECEIVED → ACCEPTED → REJECTED)
+-- Chart: Ingestion Outcome Distribution (ACCEPTED | REJECTED | DUPLICATE)
+-- RECEIVED is intentionally excluded from mv_ingestion_quality: it is a transient state
+-- that always transitions to a terminal state via a CDC UPDATE, which would double-count.
 SELECT
     status,
     sum(event_count) AS count

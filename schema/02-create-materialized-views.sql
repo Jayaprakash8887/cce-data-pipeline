@@ -163,21 +163,28 @@ GROUP BY day, facility_id, resource_type;
 -- countIfState(status='X') accumulates across every CDC event (INSERT + each UPDATE), so
 -- a single row updated ACTIVE→COMPLETED would produce active_count=1 AND completed_count=1.
 -- For current status breakdown, query protocol_instances FINAL directly.
+-- protocol_canonical is removed from GROUP BY and stored as anyState: it is set once
+-- at enrollment and never changes, so anyState (pick any value) is correct and avoids
+-- the risk of AggregatingMergeTree creating separate unmerged rows if the value ever
+-- differed across CDC events for the same (patient_id, protocol_definition_id).
 CREATE MATERIALIZED VIEW IF NOT EXISTS mv_compliance_by_patient
 ENGINE = AggregatingMergeTree()
 ORDER BY (patient_id, protocol_definition_id)
 AS SELECT
     patient_id,
     protocol_definition_id,
-    protocol_canonical,
-    minState(enrolled_at) AS first_enrolled,
-    maxState(updated_at)  AS last_updated
+    anyState(protocol_canonical) AS protocol_canonical,
+    minState(enrolled_at)        AS first_enrolled,
+    maxState(updated_at)         AS last_updated
 FROM protocol_instances
-GROUP BY patient_id, protocol_definition_id, protocol_canonical;
+GROUP BY patient_id, protocol_definition_id;
 
 -- Patient-level deviations (JOIN deviations → protocol_instances for patient_id)
--- LEFT JOIN: if protocol_instances row hasn't arrived yet via CDC, the deviation is
--- still captured with a NULL patient_id rather than silently dropped.
+-- LEFT JOIN with FINAL: protocol_instances is a ReplacingMergeTree; without FINAL,
+-- unmerged duplicate rows for the same id would inflate countState() by returning
+-- multiple JOIN matches per deviation row. FINAL deduplicates at execution time.
+-- coalesce: if the protocol_instance hasn't arrived yet via CDC, the deviation is
+-- still captured with patient_id='' rather than silently dropped.
 CREATE MATERIALIZED VIEW IF NOT EXISTS mv_deviation_by_patient
 ENGINE = AggregatingMergeTree()
 PARTITION BY toYYYYMM(day)
@@ -189,7 +196,7 @@ AS SELECT
     countState() AS deviation_count,
     uniqState(d.protocol_instance_id) AS unique_protocols
 FROM deviations d
-LEFT JOIN protocol_instances pi ON d.protocol_instance_id = pi.id
+LEFT JOIN protocol_instances FINAL pi ON d.protocol_instance_id = pi.id
 GROUP BY day, patient_id, d.deviation_type;
 
 -- Patient-level intelligence actions (enables: intelligence actions per patient per type)
@@ -253,6 +260,9 @@ GROUP BY day, source, processing_status;
 -- Bounded MV that tracks patient's latest facility assignment.
 -- Used as the SOURCE for dict_patient_facility instead of a full-table argMax scan.
 -- ReplacingMergeTree(last_seen) keeps only the latest row per patient after merges.
+-- status != 'RECEIVED': inbound_event_log rows are inserted as RECEIVED then updated
+-- to a terminal state. Both CDC events carry identical subject/facility_id/received_at,
+-- so filtering to terminal states halves writes without any correctness impact.
 CREATE MATERIALIZED VIEW IF NOT EXISTS mv_patient_facility_latest
 ENGINE = ReplacingMergeTree(last_seen)
 ORDER BY (patient_id)
@@ -261,4 +271,4 @@ AS SELECT
     facility_id,
     received_at AS last_seen
 FROM inbound_event_logs
-WHERE subject != '' AND facility_id != '';
+WHERE subject != '' AND facility_id != '' AND status != 'RECEIVED';
