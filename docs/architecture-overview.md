@@ -216,8 +216,8 @@ flowchart TD
 | **Deviations** | Overdue/missed counts, trends, by protocol/patient | `deviations` → `mv_deviation_trends`, `mv_deviation_by_protocol`, `mv_deviation_by_patient` |
 | **Ingestion Quality** | Acceptance rate, rejection reasons, source quality | `inbound_event_logs` → `mv_ingestion_quality` |
 | **Intelligence & Triggers** | Trigger volume by action type, destination, reason | `intelligence_event_logs` → `mv_intelligence_summary`, `mv_intelligence_by_patient/protocol` |
-| **Delivery Performance** | Success rate, latency, errors per adaptor/protocol | `intelligence_deliveries` → `mv_delivery_current` (ReplacingMergeTree, query with FINAL) |
-| **Step/Scheduler** | Step states, completions, protocol progress | `step_instances` → `mv_step_current` (ReplacingMergeTree, query with FINAL) |
+| **Delivery Performance** | Success rate, latency, errors per adaptor/protocol | `intelligence_deliveries FINAL` (base table, ReplacingMergeTree) |
+| **Step/Scheduler** | Step states, completions, protocol progress | `step_instances FINAL` (base table, ReplacingMergeTree) |
 | **Pipeline Health** | CDC lag, mirror status | PeerDB metrics + Grafana |
 
 ---

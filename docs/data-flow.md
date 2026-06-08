@@ -231,8 +231,8 @@ Materialized Views in ClickHouse are triggered on INSERT — they read from the 
 | `mv_intelligence_by_patient` | `intelligence_event_logs` | AggregatingMergeTree | `countState()` per subject/action_type/day |
 | `mv_intelligence_by_protocol` | `intelligence_event_logs` | AggregatingMergeTree | `countState()` per protocol_instance_id/action_type/day |
 | `mv_patient_facility_latest` | `inbound_event_logs` | ReplacingMergeTree(last_seen) | Latest facility per patient (dictionary source) |
-| `mv_step_current` | `step_instances` | ReplacingMergeTree(_peerdb_version) | Current state per step; query with FINAL for exact counts |
-| `mv_delivery_current` | `intelligence_deliveries` | ReplacingMergeTree(_peerdb_version) | Current state per delivery; query with FINAL for exact counts |
+| `step_instances FINAL` | `step_instances` | ReplacingMergeTree(_peerdb_version) | Current state per step; query with FINAL for exact counts |
+| `intelligence_deliveries FINAL` | `intelligence_deliveries` | ReplacingMergeTree(_peerdb_version) | Current state per delivery; query with FINAL for exact counts |
 
 ### 4.3 Entity × Behavior Coverage Matrix
 
@@ -245,9 +245,9 @@ Every meaningful Entity × Behavior combination is pre-aggregated or resolvable 
 | **Compliance** | `mv_compliance_by_patient` | via `dict_patient_facility` | n/a | `mv_compliance_summary` | — | — |
 | **Deviations** | `mv_deviation_by_patient` | via `dict_patient_facility` | n/a | `mv_deviation_by_protocol` | — | — |
 | **Intelligence Triggers** | `mv_intelligence_by_patient` | via `dict_patient_facility` | n/a | `mv_intelligence_by_protocol` | — | — |
-| **Delivery** | `mv_delivery_current FINAL` | via `dict_patient_facility` | n/a | `mv_delivery_current FINAL` | — | — |
-| **Step States** | `mv_step_current FINAL` | via `dict_patient_facility` | n/a | `mv_step_current FINAL` | — | — |
-| **Step Timeliness** | `mv_step_current FINAL` | via `dict_patient_facility` | n/a | `mv_step_current FINAL` | — | — |
+| **Delivery** | `intelligence_deliveries FINAL FINAL` | via `dict_patient_facility` | n/a | `intelligence_deliveries FINAL FINAL` | — | — |
+| **Step States** | `step_instances FINAL FINAL` | via `dict_patient_facility` | n/a | `step_instances FINAL FINAL` | — | — |
+| **Step Timeliness** | `step_instances FINAL FINAL` | via `dict_patient_facility` | n/a | `step_instances FINAL FINAL` | — | — |
 | **Facility Summary** | `mv_facility_summary` (uniq) | `mv_facility_summary` | `mv_facility_summary` (uniq) | — | `mv_facility_summary` | — |
 | **Practitioner Activity** | `mv_practitioner_summary` (uniq) | `mv_practitioner_summary` | `mv_practitioner_summary` | — | `mv_practitioner_summary` | — |
 
@@ -425,8 +425,8 @@ flowchart TD
         MV7["mv_deviation_by_protocol"]
         MV8["mv_ingestion_quality"]
         MV9["mv_intelligence_summary"]
-        MV10["mv_delivery_current"]
-        MV11["mv_step_current"]
+        MV10["intelligence_deliveries FINAL"]
+        MV11["step_instances FINAL"]
     end
 
     IEL -->|CDC| CH_IEL

@@ -7,7 +7,7 @@ SELECT
     toStartOfDay(updated_at) AS day,
     state,
     count() AS step_count
-FROM mv_step_current FINAL
+FROM step_instances FINAL
 WHERE updated_at >= today() - 30
 GROUP BY day, state
 ORDER BY day;

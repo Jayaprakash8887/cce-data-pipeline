@@ -8,7 +8,7 @@ SELECT
     round(
         countIf(status = 'DELIVERED') / nullIf(count(), 0) * 100, 1
     ) AS success_rate_pct
-FROM mv_delivery_current FINAL
+FROM intelligence_deliveries FINAL
 WHERE created_at >= now() - INTERVAL 30 DAY
     AND status IN ('DELIVERED', 'FAILED', 'CANCELLED')
 GROUP BY day, adaptor_name
@@ -20,7 +20,7 @@ SELECT
     countIf(status = 'DELIVERED') AS delivered,
     countIf(status = 'FAILED')    AS failed,
     countIf(status = 'CANCELLED') AS cancelled
-FROM mv_delivery_current FINAL
+FROM intelligence_deliveries FINAL
 WHERE created_at >= now() - INTERVAL 7 DAY
     AND status IN ('DELIVERED', 'FAILED', 'CANCELLED')
 GROUP BY adaptor_name
@@ -32,7 +32,7 @@ SELECT
     destination,
     count() AS total,
     round(countIf(status = 'DELIVERED') / nullIf(count(), 0) * 100, 1) AS success_rate
-FROM mv_delivery_current FINAL
+FROM intelligence_deliveries FINAL
 WHERE created_at >= now() - INTERVAL 7 DAY
     AND status IN ('DELIVERED', 'FAILED', 'CANCELLED')
 GROUP BY adaptor_name, destination;
@@ -41,7 +41,7 @@ GROUP BY adaptor_name, destination;
 SELECT
     adaptor_name,
     round(quantile(0.95)(latency_ms), 0) AS p95_latency_ms
-FROM mv_delivery_current FINAL
+FROM intelligence_deliveries FINAL
 WHERE created_at >= now() - INTERVAL 7 DAY
     AND status = 'DELIVERED'
 GROUP BY adaptor_name

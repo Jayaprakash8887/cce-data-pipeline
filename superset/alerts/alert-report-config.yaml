@@ -50,7 +50,7 @@ alerts:
       SELECT round(
         countIf(status = 'DELIVERED') / nullIf(countIf(status IN ('DELIVERED', 'FAILED', 'CANCELLED')), 0) * 100, 1
       ) AS success_rate
-      FROM mv_delivery_current FINAL
+      FROM intelligence_deliveries FINAL
       WHERE created_at >= now() - INTERVAL 1 HOUR
         AND status IN ('DELIVERED', 'FAILED', 'CANCELLED')
     threshold: 80

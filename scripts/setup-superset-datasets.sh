@@ -64,9 +64,6 @@ DATASETS=(
     "mv_intelligence_summary"
     "mv_intelligence_by_patient"
     "mv_intelligence_by_protocol"
-    # Denormalized current-state views
-    "mv_step_current"
-    "mv_delivery_current"
     # Practitioners / Facilities
     "mv_practitioner_summary"
     "mv_facility_summary"

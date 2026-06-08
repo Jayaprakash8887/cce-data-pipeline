@@ -3,9 +3,11 @@
 -- Run via PeerDB UI or CLI: peerdb mirror create --from-file connectors/peerdb-mirror.sql
 --
 -- Prerequisites:
---   1. PostgreSQL: wal_level=logical, REPLICA IDENTITY FULL on all tables
---   2. PeerDB peers configured: 'ccedb_peer' (PostgreSQL) and 'clickhouse_peer' (ClickHouse)
---   3. ClickHouse database 'cce_analytics' created
+--   1. Run schema/01-create-tables.sql FIRST — tables are pre-created with
+--      ReplacingMergeTree(_peerdb_version, _peerdb_is_deleted) + clean_deleted_rows = 'Always'.
+--      PeerDB will use existing tables; it will NOT recreate them.
+--   2. PostgreSQL: wal_level=logical, REPLICA IDENTITY FULL on all tables (cdc/01-configure-replication.sql)
+--   3. PeerDB peers configured: 'ccedb_peer' (PostgreSQL) and 'clickhouse_peer' (ClickHouse)
 
 -- Create the CDC mirror
 CREATE MIRROR cce_analytics_mirror

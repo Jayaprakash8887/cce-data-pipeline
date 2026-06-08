@@ -91,7 +91,7 @@ CREATE PUBLICATION cce_analytics_pub FOR TABLE
 
 ### 2.1 ClickHouse
 
-Single-node deployment with `ReplacingMergeTree` tables (auto-created by PeerDB).
+Single-node deployment with `ReplacingMergeTree(_peerdb_version, _peerdb_is_deleted)` tables (pre-created via `schema/01-create-tables.sql` before PeerDB mirror setup).
 
 - **Database:** `cce_analytics`
 - **User:** `cce_pipeline`
@@ -178,9 +178,9 @@ cce-analytics/
 
 ```mermaid
 flowchart TD
-    A["1. ClickHouse + MinIO"] --> B["2. PeerDB (create mirror)"]
-    B --> C["3. Wait for initial snapshot"]
-    C --> D["4. Add MATERIALIZED columns (schema/01)"]
+    A["1. ClickHouse + MinIO"] --> B["2. Run schema/01 (pre-create tables)"]
+    B --> C["3. PeerDB (create mirror — uses existing tables)"]
+    C --> D["4. Wait for initial snapshot"]
     D --> E["5. Create MVs + Indexes (schema/02-04)"]
     E --> F["6. Backfill MVs with snapshot data"]
     F --> G["7. Redis + Superset DB"]
@@ -228,27 +228,38 @@ psql "host=localhost port=9900 dbname=peerdb" \
 
 ## 7. Schema Deployment
 
-Run AFTER PeerDB initial snapshot completes (tables must exist):
+### Step 1 — Pre-create tables (BEFORE starting PeerDB mirror)
+
+Tables must exist before PeerDB begins replication. PeerDB uses existing tables and does not recreate them.
 
 ```bash
-# Apply in order (all scripts are idempotent)
 CH_HOST=${CH_HOST:-localhost}
 CH_USER=${CH_USER:-cce_pipeline}
 CH_PASS=${CLICKHOUSE_PASSWORD:-cce_analytics_dev}
 
-# Step 1: Add MATERIALIZED columns to PeerDB-created tables
+# Creates all 11 base tables with ReplacingMergeTree(_peerdb_version, _peerdb_is_deleted)
+# Requires ClickHouse 23.2+ (clean_deleted_rows = 'Always')
 clickhouse-client --host "$CH_HOST" --user "$CH_USER" --password "$CH_PASS" \
-  --database cce_analytics --multiquery < schema/01-create-tables.sql
+  --multiquery < schema/01-create-tables.sql
+```
 
-# Step 2: Create Materialized Views
+### Step 2 — Start PeerDB mirror and wait for snapshot
+
+```bash
+psql "host=localhost port=9900 dbname=peerdb" < connectors/peerdb-mirror.sql
+# Monitor snapshot progress in PeerDB UI at http://localhost:3000
+```
+
+### Step 3 — Create MVs, indexes, and dictionaries (AFTER snapshot completes)
+
+```bash
+# All scripts are idempotent
 clickhouse-client --host "$CH_HOST" --user "$CH_USER" --password "$CH_PASS" \
   --database cce_analytics --multiquery < schema/02-create-materialized-views.sql
 
-# Step 3: Create indexes and projections
 clickhouse-client --host "$CH_HOST" --user "$CH_USER" --password "$CH_PASS" \
   --database cce_analytics --multiquery < schema/03-create-indexes-projections.sql
 
-# Step 4: Create dictionaries
 clickhouse-client --host "$CH_HOST" --user "$CH_USER" --password "$CH_PASS" \
   --database cce_analytics --multiquery < schema/04-create-dictionary.sql
 ```
@@ -442,22 +453,17 @@ When a new MV is created, it only captures data inserted **after** creation. To 
 
 ```bash
 # 1. Identify the target MV and its source table
-clickhouse-client --query "SHOW CREATE TABLE cce_analytics.mv_step_current"
+clickhouse-client --query "SHOW CREATE TABLE cce_analytics.mv_deviation_trends"
 
 # 2. Insert historical data using the MV's SELECT query against the source table
 clickhouse-client --query "
-  INSERT INTO cce_analytics.mv_step_current
+  INSERT INTO cce_analytics.mv_deviation_trends
   SELECT
-      id,
-      _peerdb_version,
-      protocol_instance_id,
-      action_id,
-      state,
-      completion_status,
-      created_at,
-      updated_at,
-      completed_at
-  FROM cce_analytics.step_instances"
+      toStartOfDay(detected_at) AS day,
+      deviation_type,
+      count() AS deviation_count
+  FROM cce_analytics.deviations
+  GROUP BY day, deviation_type"
 ```
 
 **General pattern:**

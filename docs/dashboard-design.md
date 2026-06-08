@@ -464,7 +464,7 @@ SELECT
     countIf(status IN ('FAILED', 'CANCELLED')) AS total_failed,
     round(countIf(status = 'DELIVERED') / nullIf(count(), 0) * 100, 1) AS success_rate_pct,
     round(avg(latency_ms), 0) AS avg_latency_ms
-FROM mv_delivery_current FINAL
+FROM intelligence_deliveries FINAL
 WHERE created_at BETWEEN '{{ start_date }}' AND '{{ end_date }}'
     AND status IN ('DELIVERED', 'FAILED', 'CANCELLED')
     {% if adaptor_name %} AND adaptor_name = '{{ adaptor_name }}' {% endif %};
@@ -481,7 +481,7 @@ SELECT
     round(countIf(status = 'DELIVERED') / nullIf(count(), 0) * 100, 1) AS success_rate_pct,
     round(avg(latency_ms), 0) AS avg_latency_ms,
     round(quantile(0.95)(latency_ms), 0) AS p95_latency_ms
-FROM mv_delivery_current FINAL
+FROM intelligence_deliveries FINAL
 WHERE created_at BETWEEN '{{ start_date }}' AND '{{ end_date }}'
     AND status IN ('DELIVERED', 'FAILED', 'CANCELLED')
 GROUP BY ts, adaptor_name, destination
@@ -496,7 +496,7 @@ SELECT
     count() AS total,
     countIf(status = 'DELIVERED') AS delivered,
     round(countIf(status = 'DELIVERED') / nullIf(count(), 0) * 100, 1) AS success_rate_pct
-FROM mv_delivery_current FINAL
+FROM intelligence_deliveries FINAL
 WHERE created_at >= today() - INTERVAL 7 DAY
     AND status IN ('DELIVERED', 'FAILED', 'CANCELLED')
 GROUP BY adaptor_name, destination
@@ -794,8 +794,8 @@ Register these as Superset datasets for drag-and-drop chart building:
 | `Deviation Trends (MV)` | `mv_deviation_trends` | Pre-aggregated deviations |
 | `Facility Summary (MV)` | `mv_facility_summary` | Pre-aggregated facility metrics |
 | `Practitioner Summary (MV)` | `mv_practitioner_summary` | Pre-aggregated practitioner metrics |
-| `Delivery Current State` | `mv_delivery_current FINAL` | Denormalized delivery state (ReplacingMergeTree) |
-| `Step Current State` | `mv_step_current FINAL` | Denormalized step state (ReplacingMergeTree) |
+| `Intelligence Deliveries` | `intelligence_deliveries FINAL` | Current delivery state (ReplacingMergeTree base table) |
+| `Step Instances` | `step_instances FINAL` | Current step state (ReplacingMergeTree base table) |
 | `Ingestion Quality (MV)` | `mv_ingestion_quality` | Source quality metrics |
 
 ### 9.2 Roles & Permissions
