@@ -27,7 +27,7 @@
 - [ ] PostgreSQL replication slot created: `cce_analytics_slot`
 - [ ] PostgreSQL publication created: `cce_analytics_pub`
 - [ ] ClickHouse database `cce_analytics` created
-- [ ] ClickHouse user `cce_pipeline` created with appropriate grants
+- [ ] ClickHouse users `cce_pipeline` (analytics, readonly) and `cce_cdc_writer` (PeerDB write access) created with appropriate grants
 - [ ] PeerDB deployed (OSS Docker or managed)
 - [ ] MinIO/S3 configured for PeerDB staging
 - [ ] Network connectivity verified between all services
@@ -286,7 +286,7 @@ clickhouse-client --host "$CH_HOST" --user "$CH_USER" --password "$CH_PASS" \
 |-------|---------|----------|
 | ClickHouse alive | `curl -s http://localhost:8123/ping` | `Ok.` |
 | Tables exist | `clickhouse-client -q "SELECT count() FROM system.tables WHERE database='cce_analytics'"` | `>= 11` |
-| MVs exist | `clickhouse-client -q "SELECT count() FROM system.tables WHERE database='cce_analytics' AND engine LIKE '%View%'"` | `>= 22` |
+| MVs exist | `clickhouse-client -q "SELECT count() FROM system.tables WHERE database='cce_analytics' AND engine LIKE '%View%'"` | `>= 14` |
 | Data flowing | `clickhouse-client -q "SELECT name, total_rows FROM system.tables WHERE database='cce_analytics' AND total_rows > 0"` | Tables with rows |
 | PeerDB mirror | `psql "host=localhost port=9900 dbname=peerdb" -c "SELECT mirror_state FROM peerdb.mirrors"` | `active` |
 | Superset | `curl -s http://localhost:8088/health` | `OK` |
@@ -369,8 +369,10 @@ clickhouse-client -q "TRUNCATE TABLE cce_analytics.inbound_event_logs"
 # 3. Recreate mirror (triggers full initial snapshot)
 psql "host=localhost port=9900 dbname=peerdb" < connectors/peerdb-mirror.sql
 
-# 4. Wait for snapshot to complete, then re-apply schema customizations
-clickhouse-client --database cce_analytics --multiquery < schema/01-create-tables.sql
+# 4. Wait for snapshot to complete, then re-apply MVs, indexes, and dictionaries
+clickhouse-client --database cce_analytics --multiquery < schema/02-create-materialized-views.sql
+clickhouse-client --database cce_analytics --multiquery < schema/03-create-indexes-projections.sql
+clickhouse-client --database cce_analytics --multiquery < schema/04-create-dictionary.sql
 ```
 
 ### Partial Table Resync

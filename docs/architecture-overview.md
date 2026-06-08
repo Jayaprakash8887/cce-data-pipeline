@@ -84,7 +84,7 @@ graph TB
 | Component | Minimum Version | Tested Version | Notes |
 |-----------|----------------|----------------|-------|
 | PeerDB | 0.18 | latest | OSS self-hosted |
-| ClickHouse | 23.8 LTS | 24.8 LTS | LTS release recommended |
+| ClickHouse | 23.2 | 24.8 LTS | 23.2+ required for `clean_deleted_rows = 'Always'` |
 | Apache Superset | 3.0 | 4.0.2 | With ClickHouse driver |
 | Grafana | 10.0 | 11.2 | With ClickHouse plugin |
 | PostgreSQL (source) | 14 | 16 | Existing CCE database (`ccedb`) |
@@ -132,9 +132,9 @@ graph TB
 
 ### 4.1 CDC Layer (PeerDB)
 
-**PeerDB** connects directly to PostgreSQL's logical replication stream and writes to ClickHouse using an intermediary S3/MinIO stage for performance. It creates `ReplacingMergeTree(_peerdb_version)` tables automatically with columns mirroring the PostgreSQL source.
+**PeerDB** connects directly to PostgreSQL's logical replication stream and writes to ClickHouse using an intermediary S3/MinIO stage for performance. All 11 ClickHouse tables are **pre-created** via `schema/01-create-tables.sql` with `ReplacingMergeTree(_peerdb_version, _peerdb_is_deleted)` and `SETTINGS clean_deleted_rows = 'Always'` before the PeerDB mirror is started. PeerDB writes into existing tables and does not recreate them. MATERIALIZED columns for JSON extraction are defined inline in the table DDL.
 
-All 11 CDC tables reside in the shared `ccedb` PostgreSQL database. A single PeerDB mirror replicates all tables. After mirror creation, MATERIALIZED columns are added via `ALTER TABLE` for zero-cost JSON extraction. For the full table listing, mirror config, and schema details, see [Data Flow & Schema Design](data-flow.md).
+All 11 CDC tables reside in the shared `ccedb` PostgreSQL database. A single PeerDB mirror replicates all tables. For the full table listing, mirror config, and schema details, see [Data Flow & Schema Design](data-flow.md).
 
 **PeerDB metadata columns** (added automatically to all tables):
 - `_peerdb_synced_at` — timestamp of sync to ClickHouse
@@ -144,15 +144,17 @@ All 11 CDC tables reside in the shared `ccedb` PostgreSQL database. A single Pee
 ### 4.2 Analytics Storage Layer (ClickHouse)
 
 **Key features leveraged:**
-- **ReplacingMergeTree** — CDC-compatible engine with `_peerdb_version` for idempotent upserts
-- **MATERIALIZED columns** — Extract JSON fields from `raw_payload` at insert time (zero query cost)
-- **Materialized Views** — Real-time pre-aggregation triggered on INSERT (22 MVs total)
-- **AggregatingMergeTree** — Correct incremental aggregation with `-State`/`-Merge` combinators
+- **ReplacingMergeTree (two-parameter)** — `ReplacingMergeTree(_peerdb_version, _peerdb_is_deleted)` with `clean_deleted_rows = 'Always'`: deduplicates by version, physically removes soft-deleted rows on merge
+- **MATERIALIZED columns** — Extract JSON fields from `raw_payload` at insert time (zero query cost), defined inline in table DDL
+- **Materialized Views** — Real-time pre-aggregation triggered on INSERT (14 MVs on append-only sources); mutable entities queried via `FINAL` on base tables
+- **AggregatingMergeTree** — Correct incremental aggregation with `-State`/`-Merge` combinators (event logs, deviations — append-only sources only)
 - **SummingMergeTree** — Simple additive rollups (counts per hour/day)
-- **Dictionaries** — Fast key-value lookups replacing JOINs (3 dictionaries)
-- **Projections** — Alternative sort orders for common access patterns (4 projections)
+- **Dictionaries** — Fast key-value lookups replacing JOINs (3 dictionaries, all using `QUERY...FINAL` sources)
+- **Projections** — Alternative sort orders for common access patterns (7 projections)
+- **Bloom filter indexes** — 15 secondary indexes for fast point lookups on non-ORDER-BY columns
 - **CODEC compression** — LZ4/ZSTD for 10-40x compression on event data
-- **TTL** — Automatic data lifecycle management
+- **TTL** — 90-day hot retention on 4 high-volume log tables (inbound_event_logs, intelligence_event_logs, intelligence_deliveries, compliance_event_logs)
+- **User profiles** — `analytics` (readonly, `final=1` auto-applied) for Superset; `peerdb_writer` (write access, no FINAL overhead) for PeerDB CDC writes
 
 For full schema DDL, MV catalog, Entity × Behavior coverage matrix, and query patterns, see [Data Flow & Schema Design](data-flow.md).
 

@@ -67,18 +67,20 @@ PeerDB reads the PostgreSQL Write-Ahead Log (WAL) via logical replication and wr
 
 ### 2.2 Deduplication & Delete Handling
 
-PeerDB uses `ReplacingMergeTree(_peerdb_version)` for idempotent upserts.
+All 11 ClickHouse tables are **pre-created** via `schema/01-create-tables.sql` before the PeerDB mirror starts. PeerDB writes into the existing tables without recreating them.
+
+**Engine:** `ReplacingMergeTree(_peerdb_version, _peerdb_is_deleted)` with `SETTINGS clean_deleted_rows = 'Always'` (requires ClickHouse 23.2+).
 
 **Deduplication strategy:**
 - `_peerdb_version` increases monotonically per row
-- `ReplacingMergeTree(_peerdb_version)` deduplicates on the ORDER BY key, keeping the highest version
+- The two-parameter form deduplicates on the ORDER BY key, keeping the highest version row. If the winning row has `_peerdb_is_deleted=1`, it is physically removed during background merges.
 - Background merges collapse duplicates asynchronously
 - **Queries MUST use `FINAL`** or subqueries with `argMax()` when exact deduplication is needed before merges complete
 
-**Delete handling (soft deletes):**
-- PeerDB marks deleted rows with `_peerdb_is_deleted = true`
-- Filter in queries: `WHERE _peerdb_is_deleted = false` (or omit for append-only tables like event logs)
-- Periodic cleanup: `ALTER TABLE ... DELETE WHERE _peerdb_is_deleted = true` (optional)
+**Delete handling:**
+- PeerDB sets `_peerdb_is_deleted=1` (soft-delete flag) for PostgreSQL DELETEs (`soft_delete=true` in mirror config)
+- `clean_deleted_rows = 'Always'` physically removes deleted rows during background merges — no `WHERE _peerdb_is_deleted = false` filter needed in queries
+- The `cce_pipeline` user profile has `final=1` so all ad-hoc Superset queries automatically apply FINAL
 
 ---
 
@@ -128,7 +130,8 @@ practitioner_display String MATERIALIZED
 | `rejection_reason` | LowCardinality(Nullable(String)) | If rejected |
 | `received_at` | DateTime64(3) | Ingestion timestamp |
 | `updated_at` | DateTime64(3) | Last modification timestamp |
-| `_version` | UInt64 | CDC version (LSN) |
+| `_peerdb_version` | Int64 | CDC version for ReplacingMergeTree deduplication |
+| `_peerdb_is_deleted` | UInt8 | Soft-delete flag (1 = deleted in PostgreSQL) |
 | `subject` | String (MATERIALIZED) | Patient identifier |
 | `event_type` | String (MATERIALIZED) | CloudEvents type |
 | `facility_id` | String (MATERIALIZED) | Facility identifier |
@@ -138,9 +141,9 @@ practitioner_display String MATERIALIZED
 | `practitioner_ref` | String (MATERIALIZED) | Practitioner reference |
 | `practitioner_display` | String (MATERIALIZED) | Practitioner name |
 
-**Engine:** `ReplacingMergeTree(_version)`  
+**Engine:** `ReplacingMergeTree(_peerdb_version, _peerdb_is_deleted) SETTINGS clean_deleted_rows = 'Always'`  
 **Partition:** `toYYYYMM(received_at)`  
-**Order By:** `(source, received_at, id)`
+**Order By:** `(id)`
 
 #### `protocol_instances`
 
@@ -156,7 +159,7 @@ practitioner_display String MATERIALIZED
 | `updated_at` | DateTime64(3) |
 | `_version` | UInt64 |
 
-**Engine:** `ReplacingMergeTree(_version)` | **Order By:** `(id)`
+**Engine:** `ReplacingMergeTree(_peerdb_version, _peerdb_is_deleted) SETTINGS clean_deleted_rows = 'Always'` | **Order By:** `(id)`
 
 #### `step_instances`
 
@@ -179,7 +182,7 @@ practitioner_display String MATERIALIZED
 | `updated_at` | DateTime64(3) |
 | `_version` | UInt64 |
 
-**Engine:** `ReplacingMergeTree(_version)` | **Order By:** `(id)`
+**Engine:** `ReplacingMergeTree(_peerdb_version, _peerdb_is_deleted) SETTINGS clean_deleted_rows = 'Always'` | **Order By:** `(id)`
 
 #### `deviations`
 
@@ -193,11 +196,12 @@ practitioner_display String MATERIALIZED
 | `intelligence_event_id` | Nullable(UUID) |
 | `metadata` | Nullable(String) |
 | `updated_at` | DateTime64(3) |
-| `_version` | UInt64 |
+| `_peerdb_version` | Int64 |
+| `_peerdb_is_deleted` | UInt8 |
 
-**Engine:** `ReplacingMergeTree(_version)`  
+**Engine:** `ReplacingMergeTree(_peerdb_version, _peerdb_is_deleted) SETTINGS clean_deleted_rows = 'Always'`  
 **Partition:** `toYYYYMM(detected_at)`  
-**Order By:** `(deviation_type, detected_at, id)`
+**Order By:** `(id)`
 
 ---
 
@@ -245,9 +249,9 @@ Every meaningful Entity × Behavior combination is pre-aggregated or resolvable 
 | **Compliance** | `mv_compliance_by_patient` | via `dict_patient_facility` | n/a | `mv_compliance_summary` | — | — |
 | **Deviations** | `mv_deviation_by_patient` | via `dict_patient_facility` | n/a | `mv_deviation_by_protocol` | — | — |
 | **Intelligence Triggers** | `mv_intelligence_by_patient` | via `dict_patient_facility` | n/a | `mv_intelligence_by_protocol` | — | — |
-| **Delivery** | `intelligence_deliveries FINAL FINAL` | via `dict_patient_facility` | n/a | `intelligence_deliveries FINAL FINAL` | — | — |
-| **Step States** | `step_instances FINAL FINAL` | via `dict_patient_facility` | n/a | `step_instances FINAL FINAL` | — | — |
-| **Step Timeliness** | `step_instances FINAL FINAL` | via `dict_patient_facility` | n/a | `step_instances FINAL FINAL` | — | — |
+| **Delivery** | `intelligence_deliveries FINAL` | via `dict_patient_facility` | n/a | `intelligence_deliveries FINAL` | — | — |
+| **Step States** | `step_instances FINAL` | via `dict_patient_facility` | n/a | `step_instances FINAL` | — | — |
+| **Step Timeliness** | `step_instances FINAL` | via `dict_patient_facility` | n/a | `step_instances FINAL` | — | — |
 | **Facility Summary** | `mv_facility_summary` (uniq) | `mv_facility_summary` | `mv_facility_summary` (uniq) | — | `mv_facility_summary` | — |
 | **Practitioner Activity** | `mv_practitioner_summary` (uniq) | `mv_practitioner_summary` | `mv_practitioner_summary` | — | `mv_practitioner_summary` | — |
 
@@ -289,24 +293,39 @@ ORDER BY total_events DESC;
 
 ### 5.1 Secondary Indexes
 
-| Table | Index | Type | Column |
-|-------|-------|------|--------|
-| `inbound_event_logs` | `idx_facility` | `bloom_filter` | `facility_id` |
-| `inbound_event_logs` | `idx_resource_type` | `bloom_filter` | `resource_type` |
-| `intelligence_event_logs` | `idx_subject` | `bloom_filter` | `subject` |
-| `intelligence_deliveries` | `idx_intelligence_event` | `bloom_filter` | `intelligence_event_id` |
-| `step_instances` | `idx_protocol_instance` | `bloom_filter` | `protocol_instance_id` |
+15 bloom filter indexes for fast point lookups on non-ORDER-BY columns. All indexes are materialized via `MATERIALIZE INDEX` to cover existing snapshot data.
+
+| Table | Index | Column |
+|-------|-------|--------|
+| `inbound_event_logs` | `idx_cloudevents_id` | `cloudevents_id` |
+| `inbound_event_logs` | `idx_correlation` | `correlation_id` |
+| `inbound_event_logs` | `idx_source` | `source` |
+| `protocol_instances` | `idx_patient_id` | `patient_id` |
+| `protocol_instances` | `idx_protocol_definition` | `protocol_definition_id` |
+| `step_instances` | `idx_protocol_instance` | `protocol_instance_id` |
+| `step_instances` | `idx_state` | `state` |
+| `step_instances` | `idx_action_id` | `action_id` |
+| `deviations` | `idx_protocol_instance` | `protocol_instance_id` |
+| `deviations` | `idx_step_instance` | `step_instance_id` |
+| `intelligence_event_logs` | `idx_subject` | `subject` |
+| `intelligence_event_logs` | `idx_protocol_instance` | `protocol_instance_id` |
+| `intelligence_deliveries` | `idx_intelligence_event` | `intelligence_event_id` |
+| `intelligence_deliveries` | `idx_status` | `status` |
+| `intelligence_deliveries` | `idx_subject` | `subject` |
 
 ### 5.2 Projections
 
-Projections provide alternative sort orders without separate tables:
+7 projections provide alternative sort orders without separate tables. All are materialized via `MATERIALIZE PROJECTION` to cover existing snapshot data.
 
 | Table | Projection | Order By | Use Case |
 |-------|-----------|----------|----------|
-| `inbound_event_logs` | `prj_patient_timeline` | `(subject, event_time)` | Patient event history |
+| `inbound_event_logs` | `prj_patient_timeline` | `(subject, received_at)` | Patient event history |
 | `inbound_event_logs` | `prj_facility_timeline` | `(facility_id, received_at, subject)` | Facility-scoped event queries |
-| `protocol_instances` | `prj_patient_protocols` | `(patient_id, enrolled_at)` | Patient's protocol list |
-| `deviations` | `prj_protocol_deviations` | `(protocol_instance_id, detected_at)` | Protocol drill-down |
+| `protocol_instances` | `prj_protocol_lookup` | `(protocol_definition_id, status)` | Protocol-level compliance rollups |
+| `protocol_instances` | `prj_patient_lookup` | `(patient_id, status)` | Patient-centric compliance queries |
+| `step_instances` | `prj_steps_by_protocol` | `(protocol_instance_id, state, updated_at)` | Compliance/scheduler JOIN access pattern |
+| `deviations` | `prj_protocol_deviations` | `(protocol_instance_id, deviation_type, detected_at)` | Protocol deviation drill-down |
+| `deviations` | `prj_step_deviations` | `(step_instance_id, detected_at)` | Step-level deviation join |
 
 ---
 
@@ -314,22 +333,23 @@ Projections provide alternative sort orders without separate tables:
 
 ### `dict_protocol_definitions`
 
-ClickHouse dictionary for fast JOINs against protocol metadata:
+ClickHouse dictionary for fast JOINs against protocol metadata. Uses `QUERY...FINAL` — reading via `TABLE` without FINAL can return duplicate rows from unmerged ReplacingMergeTree parts, corrupting dict lookups.
 
 ```sql
 CREATE DICTIONARY dict_protocol_definitions (
     id UUID,
     name String,
-    canonical String,
     version String,
+    url String,
+    canonical String,
     status String
 )
 PRIMARY KEY id
 SOURCE(CLICKHOUSE(
-    TABLE 'protocol_definitions'
+    QUERY 'SELECT id, name, version, url, url AS canonical, status FROM cce_analytics.protocol_definitions FINAL'
     DB 'cce_analytics'
 ))
-LIFETIME(MIN 300 MAX 600)
+LIFETIME(MIN 60 MAX 300)
 LAYOUT(HASHED());
 ```
 
@@ -337,7 +357,7 @@ Used with `dictGet()` for efficient protocol name lookups without JOIN.
 
 ### `dict_patient_facility`
 
-Maps patient → most recent facility (refreshed every 5–10 min):
+Maps patient → most recent facility (refreshed every 5–10 min). Sources from `mv_patient_facility_latest` (a `ReplacingMergeTree(last_seen)` MV) using `argMax` to force deduplication at load time:
 
 ```sql
 CREATE DICTIONARY dict_patient_facility (
@@ -347,12 +367,8 @@ CREATE DICTIONARY dict_patient_facility (
 )
 PRIMARY KEY patient_id
 SOURCE(CLICKHOUSE(
-    QUERY 'SELECT subject AS patient_id,
-           argMax(facility_id, received_at) AS facility_id,
-           max(received_at) AS last_seen
-    FROM cce_analytics.inbound_event_logs
-    WHERE subject != '''' AND facility_id != ''''
-    GROUP BY subject'
+    QUERY 'SELECT patient_id, argMax(facility_id, last_seen) AS facility_id, max(last_seen) AS last_seen FROM cce_analytics.mv_patient_facility_latest GROUP BY patient_id'
+    DB 'cce_analytics'
 ))
 LIFETIME(MIN 300 MAX 600)
 LAYOUT(COMPLEX_KEY_HASHED());
@@ -362,20 +378,19 @@ Enables facility-level slicing of patient-centric MVs at query time via `dictGet
 
 ### `dict_action_definitions`
 
-Action definition metadata for enriching intelligence/delivery views:
+Action definition metadata for enriching intelligence/delivery views. Uses `QUERY...FINAL` for same reason as `dict_protocol_definitions`.
 
 ```sql
 CREATE DICTIONARY dict_action_definitions (
     id UUID,
     canonical_url String,
-    name String,
-    title String,
+    name String DEFAULT '',
     action_type String,
     status String
 )
 PRIMARY KEY id
 SOURCE(CLICKHOUSE(
-    TABLE 'action_definitions'
+    QUERY 'SELECT id, url AS canonical_url, name, kind AS action_type, status FROM cce_analytics.action_definitions FINAL'
     DB 'cce_analytics'
 ))
 LIFETIME(MIN 60 MAX 300)
@@ -418,15 +433,23 @@ flowchart TD
 
     subgraph Materialized Views
         MV1["mv_event_volume_hourly"]
-        MV3["mv_facility_summary"]
-        MV4["mv_practitioner_summary"]
-        MV5["mv_compliance_summary"]
+        MV2["mv_facility_summary"]
+        MV3["mv_practitioner_summary"]
+        MV4["mv_compliance_summary"]
+        MV5["mv_compliance_by_patient"]
         MV6["mv_deviation_trends"]
         MV7["mv_deviation_by_protocol"]
-        MV8["mv_ingestion_quality"]
-        MV9["mv_intelligence_summary"]
-        MV10["intelligence_deliveries FINAL"]
-        MV11["step_instances FINAL"]
+        MV8["mv_deviation_by_patient"]
+        MV9["mv_ingestion_quality"]
+        MV10["mv_patient_facility_latest"]
+        MV11["mv_intelligence_summary"]
+        MV12["mv_intelligence_by_patient"]
+        MV13["mv_intelligence_by_protocol"]
+    end
+
+    subgraph Direct Queries
+        BT1["step_instances FINAL"]
+        BT2["intelligence_deliveries FINAL"]
     end
 
     IEL -->|CDC| CH_IEL
@@ -444,14 +467,18 @@ flowchart TD
     CH_IEL --> MV1
     CH_IEL --> MV2
     CH_IEL --> MV3
-    CH_IEL --> MV4
-    CH_IEL --> MV8
+    CH_IEL --> MV9
+    CH_IEL --> MV10
+    CH_PI --> MV4
     CH_PI --> MV5
     CH_DEV --> MV6
     CH_DEV --> MV7
-    CH_IEG --> MV9
-    CH_ID --> MV10
-    CH_SI --> MV11
+    CH_DEV --> MV8
+    CH_IEG --> MV11
+    CH_IEG --> MV12
+    CH_IEG --> MV13
+    CH_SI --> BT1
+    CH_ID --> BT2
 ```
 
 ---
@@ -460,13 +487,17 @@ flowchart TD
 
 | Table | TTL | Rationale |
 |-------|-----|-----------|
-| `inbound_event_logs` | (partition managed) | Full audit trail |
-| `intelligence_deliveries` | 1 year | Delivery records age out |
-| `deviations` | (none) | Clinical compliance record |
+| `inbound_event_logs` | 90 days | High-volume log; set in schema/03 |
+| `intelligence_event_logs` | 90 days | High-volume trigger log; set in schema/03 |
+| `intelligence_deliveries` | 90 days | High-volume delivery log; set in schema/03 |
+| `compliance_event_logs` | 90 days | High-volume compliance log; set in schema/03 |
+| `deviations` | (none) | Clinical compliance record — retained indefinitely |
 | `protocol_instances` | (none) | Active patient data |
 | `step_instances` | (none) | Active workflow data |
 
-Partitioning by `toYYYYMM()` enables efficient partition-level drops for aged data.
+> Healthcare regulations (e.g., HIPAA) typically require 7-year retention. The 90-day TTL applies to the ClickHouse hot tier. Configure cold-tier archival to object storage with a separate 7-year TTL to meet compliance requirements.
+
+Partitioning by `toYYYYMM()` on date columns enables efficient partition-level drops for aged data.
 
 ---
 

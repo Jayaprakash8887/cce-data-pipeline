@@ -794,8 +794,6 @@ Register these as Superset datasets for drag-and-drop chart building:
 | `Deviation Trends (MV)` | `mv_deviation_trends` | Pre-aggregated deviations |
 | `Facility Summary (MV)` | `mv_facility_summary` | Pre-aggregated facility metrics |
 | `Practitioner Summary (MV)` | `mv_practitioner_summary` | Pre-aggregated practitioner metrics |
-| `Intelligence Deliveries` | `intelligence_deliveries FINAL` | Current delivery state (ReplacingMergeTree base table) |
-| `Step Instances` | `step_instances FINAL` | Current step state (ReplacingMergeTree base table) |
 | `Ingestion Quality (MV)` | `mv_ingestion_quality` | Source quality metrics |
 
 ### 9.2 Roles & Permissions
@@ -963,8 +961,8 @@ WHERE slot_name = 'cce_analytics_slot';
 
 | Alert | PromQL / Query | Threshold | Severity |
 |-------|---------------|-----------|----------|
-| CDC Sink Connector Down | Connector status != RUNNING | 2 min | Critical |
-| Consumer lag high | `kafka_consumer_group_lag > 10000` | Sustained 5 min | Warning |
+| PeerDB Mirror Stalled | No new rows synced for 5 min | 2 min | Critical |
+| WAL Slot Lag Excessive | `pg_wal_lsn_diff > 1 GB` | Sustained 5 min | Warning |
 | E2E latency high | P95 latency > 300s | Sustained 5 min | Warning |
 | ClickHouse disk full | `ClickHouseAsyncMetrics_DiskUsed / DiskTotal > 0.8` | — | Warning |
 | CDC slot lag | `lag_bytes > 100MB` | Sustained 5 min | Critical |

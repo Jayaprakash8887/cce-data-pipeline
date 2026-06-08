@@ -29,11 +29,15 @@ docker compose up -d
 # Wait for PeerDB to be ready
 until curl -sf http://localhost:3000; do sleep 5; done
 
-# Create PeerDB mirror (replicates PostgreSQL → ClickHouse)
+# Step 1 — Pre-create ClickHouse tables (MUST run before PeerDB mirror)
+# Uses ReplacingMergeTree(_peerdb_version, _peerdb_is_deleted) + clean_deleted_rows='Always'
+# Requires ClickHouse 23.2+
+clickhouse-client --database cce_analytics --multiquery < schema/01-create-tables.sql
+
+# Step 2 — Create PeerDB mirror (uses existing tables; does not recreate them)
 psql "host=localhost port=9900 dbname=peerdb" < connectors/peerdb-mirror.sql
 
-# Wait for initial snapshot, then apply schema customizations
-clickhouse-client --database cce_analytics --multiquery < schema/01-create-tables.sql
+# Step 3 — Wait for initial snapshot, then create MVs, indexes, and dictionaries
 clickhouse-client --database cce_analytics --multiquery < schema/02-create-materialized-views.sql
 clickhouse-client --database cce_analytics --multiquery < schema/03-create-indexes-projections.sql
 clickhouse-client --database cce_analytics --multiquery < schema/04-create-dictionary.sql
@@ -47,7 +51,7 @@ For full table listing and schema details, see [Data Flow & Schema Design](docs/
 
 ## Materialized Views
 
-**22 pre-aggregated views** computed at insert time, covering event volume, compliance, deviations, intelligence, delivery, step states, and processing quality — with full Entity × Behavior cross-dimensional coverage (patient, facility, practitioner, protocol dimensions).
+**14 pre-aggregated views** computed at insert time, covering event volume, compliance, deviations, intelligence, and processing quality — with full Entity × Behavior cross-dimensional coverage (patient, facility, practitioner, protocol dimensions). Step and delivery current-state queries run directly against `step_instances FINAL` and `intelligence_deliveries FINAL` (base tables with `ReplacingMergeTree`).
 
 For the complete MV catalog and coverage matrix, see [Data Flow & Schema Design § 4](docs/data-flow.md).
 
@@ -65,8 +69,9 @@ For the complete MV catalog and coverage matrix, see [Data Flow & Schema Design 
 1. **CDC-only** — Analytics based solely on committed database records. No in-flight event consumption.
 2. **PeerDB (not Debezium + Kafka)** — Direct WAL replication to ClickHouse. Simpler operations, fewer components, native TOAST support.
 3. **No Flink/stream processing** — ClickHouse MATERIALIZED columns extract fields from `raw_payload` JSON at insert time. Materialized Views pre-aggregate. Zero custom code.
-4. **ReplacingMergeTree** — All CDC tables use `_peerdb_version` for idempotent upserts.
-5. **AggregatingMergeTree** — MVs with `uniq()`, `quantile()`, `any()` use `-State`/`-Merge` combinators for correct incremental aggregation.
+4. **ReplacingMergeTree (two-parameter form)** — All CDC tables are pre-created with `ReplacingMergeTree(_peerdb_version, _peerdb_is_deleted)` + `SETTINGS clean_deleted_rows = 'Always'` (ClickHouse 23.2+). PeerDB writes into existing tables. Deleted rows are physically purged during background merges.
+5. **AggregatingMergeTree / SummingMergeTree** — MVs on append-only tables (event logs, deviations) use `-State`/`-Merge` combinators for correct incremental aggregation. Mutable entities (step_instances, intelligence_deliveries, protocol_instances) are queried directly via `FINAL` — not via MVs — to avoid double-counting CDC UPDATE events.
+6. **Two ClickHouse user profiles** — `analytics` (readonly, `final=1` applied automatically) for Superset/analysts; `peerdb_writer` (write access, no FINAL overhead) for the PeerDB CDC writer.
 
 ## Scripts
 
