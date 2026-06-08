@@ -55,35 +55,58 @@ for table in "${EXPECTED_TABLES[@]}"; do
     fi
 done
 
-# All materialized views
-EXPECTED_MVS=(
-    # Event volume
+# MV backing tables (the actual data stores — named without suffix, queryable directly)
+EXPECTED_MV_TABLES=(
     "mv_event_volume_hourly"
-    # Compliance
     "mv_compliance_summary"
     "mv_compliance_by_patient"
     "mv_compliance_processing_quality"
-    # Deviations
     "mv_deviation_trends"
     "mv_deviation_by_protocol"
     "mv_deviation_by_patient"
-    # Ingestion quality
     "mv_ingestion_quality"
-    # Intelligence
     "mv_intelligence_summary"
     "mv_intelligence_by_patient"
     "mv_intelligence_by_protocol"
-    # Practitioners / Facilities
     "mv_practitioner_summary"
     "mv_facility_summary"
-    # Patient-facility mapping (dict source)
     "mv_patient_facility_latest"
 )
 
 echo ""
-echo "--- Materialized Views (${#EXPECTED_MVS[@]} expected) ---"
-for mv in "${EXPECTED_MVS[@]}"; do
-    EXISTS=$(curl -sf "${CH_URL}/?query=SELECT+count()+FROM+system.tables+WHERE+database='cce_analytics'+AND+name='${mv}'" | tr -d '[:space:]')
+echo "--- MV Backing Tables (${#EXPECTED_MV_TABLES[@]} expected) ---"
+for tbl in "${EXPECTED_MV_TABLES[@]}"; do
+    EXISTS=$(curl -sf "${CH_URL}/?query=SELECT+count()+FROM+system.tables+WHERE+database='cce_analytics'+AND+name='${tbl}'" | tr -d '[:space:]')
+    if [[ "$EXISTS" == "1" ]]; then
+        echo "  ✓ ${tbl}"
+    else
+        echo "  ✗ ${tbl} MISSING"
+        MISSING=$((MISSING + 1))
+    fi
+done
+
+# MV trigger views (fire on INSERT, write to backing tables above)
+EXPECTED_MV_TRIGGERS=(
+    "mv_event_volume_hourly_mv"
+    "mv_compliance_summary_mv"
+    "mv_compliance_by_patient_mv"
+    "mv_compliance_processing_quality_mv"
+    "mv_deviation_trends_mv"
+    "mv_deviation_by_protocol_mv"
+    "mv_deviation_by_patient_mv"
+    "mv_ingestion_quality_mv"
+    "mv_intelligence_summary_mv"
+    "mv_intelligence_by_patient_mv"
+    "mv_intelligence_by_protocol_mv"
+    "mv_practitioner_summary_mv"
+    "mv_facility_summary_mv"
+    "mv_patient_facility_latest_mv"
+)
+
+echo ""
+echo "--- MV Triggers (${#EXPECTED_MV_TRIGGERS[@]} expected) ---"
+for mv in "${EXPECTED_MV_TRIGGERS[@]}"; do
+    EXISTS=$(curl -sf "${CH_URL}/?query=SELECT+count()+FROM+system.tables+WHERE+database='cce_analytics'+AND+name='${mv}'+AND+engine='MaterializedView'" | tr -d '[:space:]')
     if [[ "$EXISTS" == "1" ]]; then
         echo "  ✓ ${mv}"
     else
