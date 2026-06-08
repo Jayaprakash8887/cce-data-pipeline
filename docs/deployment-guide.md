@@ -442,20 +442,22 @@ When a new MV is created, it only captures data inserted **after** creation. To 
 
 ```bash
 # 1. Identify the target MV and its source table
-clickhouse-client --query "SHOW CREATE TABLE cce_analytics.mv_step_completion_timeliness"
+clickhouse-client --query "SHOW CREATE TABLE cce_analytics.mv_step_current"
 
 # 2. Insert historical data using the MV's SELECT query against the source table
 clickhouse-client --query "
-  INSERT INTO cce_analytics.mv_step_completion_timeliness
+  INSERT INTO cce_analytics.mv_step_current
   SELECT
-      toStartOfDay(updated_at) AS day,
+      id,
+      _peerdb_version,
       protocol_instance_id,
       action_id,
+      state,
       completion_status,
-      count() AS step_count
-  FROM cce_analytics.step_instances
-  WHERE state = 'COMPLETED' AND completion_status != ''
-  GROUP BY day, protocol_instance_id, action_id, completion_status"
+      created_at,
+      updated_at,
+      completed_at
+  FROM cce_analytics.step_instances"
 ```
 
 **General pattern:**

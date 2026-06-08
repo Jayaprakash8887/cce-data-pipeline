@@ -48,10 +48,11 @@ alerts:
     description: "Adaptor success rate below 80% in last hour"
     sql: |
       SELECT round(
-        countIfMerge(delivered) / nullIf(countMerge(total_deliveries), 0) * 100, 1
+        countIf(status = 'DELIVERED') / nullIf(countIf(status IN ('DELIVERED', 'FAILED', 'CANCELLED')), 0) * 100, 1
       ) AS success_rate
-      FROM mv_delivery_performance_hourly
-      WHERE hour >= now() - INTERVAL 1 HOUR
+      FROM mv_delivery_current FINAL
+      WHERE created_at >= now() - INTERVAL 1 HOUR
+        AND status IN ('DELIVERED', 'FAILED', 'CANCELLED')
     threshold: 80
     condition: "< (less than)"
     frequency: "*/10 * * * *"

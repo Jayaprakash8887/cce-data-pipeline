@@ -459,29 +459,31 @@ GROUP BY si.action_id, si.completion_status;
 **Total Deliveries & Success Rate:**
 ```sql
 SELECT
-    sum(total_deliveries) AS total_deliveries,
-    sum(delivered) AS total_delivered,
-    sum(failed + cancelled) AS total_failed,
-    round(sum(delivered) / nullIf(sum(total_deliveries), 0) * 100, 1) AS success_rate_pct,
-    round(avg(avg_latency_ms), 0) AS avg_latency_ms
-FROM mv_delivery_performance_hourly
-WHERE hour BETWEEN '{{ start_date }}' AND '{{ end_date }}'
+    count() AS total_deliveries,
+    countIf(status = 'DELIVERED') AS total_delivered,
+    countIf(status IN ('FAILED', 'CANCELLED')) AS total_failed,
+    round(countIf(status = 'DELIVERED') / nullIf(count(), 0) * 100, 1) AS success_rate_pct,
+    round(avg(latency_ms), 0) AS avg_latency_ms
+FROM mv_delivery_current FINAL
+WHERE created_at BETWEEN '{{ start_date }}' AND '{{ end_date }}'
+    AND status IN ('DELIVERED', 'FAILED', 'CANCELLED')
     {% if adaptor_name %} AND adaptor_name = '{{ adaptor_name }}' {% endif %};
 ```
 
 **Success Rate Trend (per adaptor):**
 ```sql
 SELECT
-    toStartOfHour(hour) AS ts,
+    toStartOfHour(created_at) AS ts,
     adaptor_name,
     destination,
-    sum(total_deliveries) AS total,
-    sum(delivered) AS delivered,
-    round(sum(delivered) / nullIf(sum(total_deliveries), 0) * 100, 1) AS success_rate_pct,
-    round(avg(avg_latency_ms), 0) AS avg_latency_ms,
-    max(p95_latency_ms) AS p95_latency_ms
-FROM mv_delivery_performance_hourly
-WHERE hour BETWEEN '{{ start_date }}' AND '{{ end_date }}'
+    count() AS total,
+    countIf(status = 'DELIVERED') AS delivered,
+    round(countIf(status = 'DELIVERED') / nullIf(count(), 0) * 100, 1) AS success_rate_pct,
+    round(avg(latency_ms), 0) AS avg_latency_ms,
+    round(quantile(0.95)(latency_ms), 0) AS p95_latency_ms
+FROM mv_delivery_current FINAL
+WHERE created_at BETWEEN '{{ start_date }}' AND '{{ end_date }}'
+    AND status IN ('DELIVERED', 'FAILED', 'CANCELLED')
 GROUP BY ts, adaptor_name, destination
 ORDER BY ts;
 ```
@@ -491,11 +493,12 @@ ORDER BY ts;
 SELECT
     adaptor_name,
     destination,
-    sum(total_deliveries) AS total,
-    sum(delivered) AS delivered,
-    round(sum(delivered) / nullIf(sum(total_deliveries), 0) * 100, 1) AS success_rate_pct
-FROM mv_delivery_performance_hourly
-WHERE hour >= today() - INTERVAL 7 DAY
+    count() AS total,
+    countIf(status = 'DELIVERED') AS delivered,
+    round(countIf(status = 'DELIVERED') / nullIf(count(), 0) * 100, 1) AS success_rate_pct
+FROM mv_delivery_current FINAL
+WHERE created_at >= today() - INTERVAL 7 DAY
+    AND status IN ('DELIVERED', 'FAILED', 'CANCELLED')
 GROUP BY adaptor_name, destination
 ORDER BY success_rate_pct ASC;
 ```
@@ -791,8 +794,8 @@ Register these as Superset datasets for drag-and-drop chart building:
 | `Deviation Trends (MV)` | `mv_deviation_trends` | Pre-aggregated deviations |
 | `Facility Summary (MV)` | `mv_facility_summary` | Pre-aggregated facility metrics |
 | `Practitioner Summary (MV)` | `mv_practitioner_summary` | Pre-aggregated practitioner metrics |
-| `Delivery Performance (MV)` | `mv_delivery_performance_hourly` | Pre-aggregated delivery metrics |
-| `Step States (MV)` | `mv_step_states_daily` | Pre-aggregated step state distribution |
+| `Delivery Current State` | `mv_delivery_current FINAL` | Denormalized delivery state (ReplacingMergeTree) |
+| `Step Current State` | `mv_step_current FINAL` | Denormalized step state (ReplacingMergeTree) |
 | `Ingestion Quality (MV)` | `mv_ingestion_quality` | Source quality metrics |
 
 ### 9.2 Roles & Permissions

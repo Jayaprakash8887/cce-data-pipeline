@@ -2,13 +2,13 @@
 -- Step state distribution, overdue/missed rates, time-to-completion
 -- All queries use step_instances CDC table
 
--- Chart: Step States Trend (line, daily via MV)
+-- Chart: Step States Trend (line, daily)
 SELECT
-    day,
+    toStartOfDay(updated_at) AS day,
     state,
-    countMerge(step_count) AS step_count
-FROM mv_step_states_daily
-WHERE day >= today() - 30
+    count() AS step_count
+FROM mv_step_current FINAL
+WHERE updated_at >= today() - 30
 GROUP BY day, state
 ORDER BY day;
 

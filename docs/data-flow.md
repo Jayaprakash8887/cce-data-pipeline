@@ -226,18 +226,13 @@ Materialized Views in ClickHouse are triggered on INSERT — they read from the 
 | `mv_deviation_by_protocol` | `deviations` | SummingMergeTree | `deviation_count` per protocol_instance_id/type |
 | `mv_ingestion_quality` | `inbound_event_logs` | SummingMergeTree | `total_count`, `rejected_count` per source/day |
 | `mv_intelligence_summary` | `intelligence_event_logs` | AggregatingMergeTree | `countState()`, `uniqState(subject)` per action_type/day |
-| `mv_delivery_performance_hourly` | `intelligence_deliveries` | AggregatingMergeTree | `avgState(latency_ms)`, `countIfState(status='DELIVERED')` per destination/hour |
-| `mv_step_states_daily` | `step_instances` | AggregatingMergeTree | `countIfState(state='DUE')`, etc. per protocol_instance_id/day |
-| `mv_compliance_by_patient` | `protocol_instances` | AggregatingMergeTree | `countState()`, `countIfState(status)` per patient/protocol |
+| `mv_compliance_by_patient` | `protocol_instances` | AggregatingMergeTree | `minState(enrolled_at)`, `maxState(updated_at)` per patient/protocol |
 | `mv_deviation_by_patient` | `deviations` JOIN `protocol_instances` | AggregatingMergeTree | `countState()` per patient/deviation_type/day |
 | `mv_intelligence_by_patient` | `intelligence_event_logs` | AggregatingMergeTree | `countState()` per subject/action_type/day |
-| `mv_delivery_by_patient` | `intelligence_deliveries` | AggregatingMergeTree | `countIfState(status)` per subject/destination/day |
-| `mv_step_states_by_protocol` | `step_instances` | AggregatingMergeTree | `countState()` per protocol_instance_id/state/day |
-| `mv_step_states_by_patient` | `step_instances` JOIN `protocol_instances` | AggregatingMergeTree | `countState()` per patient/state/day |
 | `mv_intelligence_by_protocol` | `intelligence_event_logs` | AggregatingMergeTree | `countState()` per protocol_instance_id/action_type/day |
-| `mv_delivery_by_protocol` | `intelligence_deliveries` | AggregatingMergeTree | `countIfState(status)` per protocol_canonical/destination/day |
-| `mv_step_completion_timeliness` | `step_instances` | SummingMergeTree | `step_count` per protocol_instance_id/action_id/completion_status/day |
 | `mv_patient_facility_latest` | `inbound_event_logs` | ReplacingMergeTree(last_seen) | Latest facility per patient (dictionary source) |
+| `mv_step_current` | `step_instances` | ReplacingMergeTree(_peerdb_version) | Current state per step; query with FINAL for exact counts |
+| `mv_delivery_current` | `intelligence_deliveries` | ReplacingMergeTree(_peerdb_version) | Current state per delivery; query with FINAL for exact counts |
 
 ### 4.3 Entity × Behavior Coverage Matrix
 
@@ -250,9 +245,9 @@ Every meaningful Entity × Behavior combination is pre-aggregated or resolvable 
 | **Compliance** | `mv_compliance_by_patient` | via `dict_patient_facility` | n/a | `mv_compliance_summary` | — | — |
 | **Deviations** | `mv_deviation_by_patient` | via `dict_patient_facility` | n/a | `mv_deviation_by_protocol` | — | — |
 | **Intelligence Triggers** | `mv_intelligence_by_patient` | via `dict_patient_facility` | n/a | `mv_intelligence_by_protocol` | — | — |
-| **Delivery** | `mv_delivery_by_patient` | via `dict_patient_facility` | n/a | `mv_delivery_by_protocol` | — | — |
-| **Step States** | `mv_step_states_by_patient` | via `dict_patient_facility` | n/a | `mv_step_states_by_protocol` | — | — |
-| **Step Timeliness** | via protocol → patient | via `dict_patient_facility` | n/a | `mv_step_completion_timeliness` | — | — |
+| **Delivery** | `mv_delivery_current FINAL` | via `dict_patient_facility` | n/a | `mv_delivery_current FINAL` | — | — |
+| **Step States** | `mv_step_current FINAL` | via `dict_patient_facility` | n/a | `mv_step_current FINAL` | — | — |
+| **Step Timeliness** | `mv_step_current FINAL` | via `dict_patient_facility` | n/a | `mv_step_current FINAL` | — | — |
 | **Facility Summary** | `mv_facility_summary` (uniq) | `mv_facility_summary` | `mv_facility_summary` (uniq) | — | `mv_facility_summary` | — |
 | **Practitioner Activity** | `mv_practitioner_summary` (uniq) | `mv_practitioner_summary` | `mv_practitioner_summary` | — | `mv_practitioner_summary` | — |
 
@@ -430,8 +425,8 @@ flowchart TD
         MV7["mv_deviation_by_protocol"]
         MV8["mv_ingestion_quality"]
         MV9["mv_intelligence_summary"]
-        MV10["mv_delivery_performance_hourly"]
-        MV11["mv_step_states_daily"]
+        MV10["mv_delivery_current"]
+        MV11["mv_step_current"]
     end
 
     IEL -->|CDC| CH_IEL
@@ -505,14 +500,16 @@ LIMIT 20;
 
 ### Compliance Overview
 ```sql
+-- Query protocol_instances FINAL for live status counts.
+-- mv_compliance_summary only stores first_enrolled / last_updated because
+-- countIfState(status='X') double-counts rows that were ever updated via CDC.
 SELECT
-    protocol_canonical,
-    countMerge(total_enrollments) AS total,
-    countIfMerge(completed_count) AS completed,
-    round(countIfMerge(completed_count) / countMerge(total_enrollments) * 100, 1) AS pct
-FROM mv_compliance_summary
-WHERE report_date >= today() - 30
-GROUP BY protocol_canonical
+    pi.protocol_canonical,
+    count()                                                                AS total,
+    countIf(pi.status = 'COMPLETED')                                       AS completed,
+    round(countIf(pi.status = 'COMPLETED') / nullIf(count(), 0) * 100, 1) AS pct
+FROM protocol_instances pi FINAL
+GROUP BY pi.protocol_canonical
 ORDER BY total DESC;
 ```
 

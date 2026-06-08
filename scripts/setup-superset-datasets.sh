@@ -64,15 +64,9 @@ DATASETS=(
     "mv_intelligence_summary"
     "mv_intelligence_by_patient"
     "mv_intelligence_by_protocol"
-    # Deliveries
-    "mv_delivery_performance_hourly"
-    "mv_delivery_by_patient"
-    "mv_delivery_by_protocol"
-    # Steps / Scheduler
-    "mv_step_states_daily"
-    "mv_step_states_by_protocol"
-    "mv_step_states_by_patient"
-    "mv_step_completion_timeliness"
+    # Denormalized current-state views
+    "mv_step_current"
+    "mv_delivery_current"
     # Practitioners / Facilities
     "mv_practitioner_summary"
     "mv_facility_summary"

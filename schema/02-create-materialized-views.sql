@@ -28,15 +28,18 @@ GROUP BY hour, facility_id, source, event_type, resource_type;
 -- Protocol Compliance
 -- ============================================================
 
--- Protocol compliance rates (AggregatingMergeTree for -State functions)
+-- Protocol compliance: earliest enrollment and most recent update per protocol.
+-- NOTE: total_enrollments / active_count / completed_count are intentionally excluded.
+-- Those require current state, not accumulated state. Each PeerDB UPDATE arrives as a
+-- new INSERT into the base table, so countIfState(status='ACTIVE') would double-count
+-- every row that was ever updated. Query protocol_instances FINAL for live status counts.
 CREATE MATERIALIZED VIEW IF NOT EXISTS mv_compliance_summary
 ENGINE = AggregatingMergeTree()
 ORDER BY (protocol_definition_id)
 AS SELECT
     protocol_definition_id,
-    countState() AS total_enrollments,
-    countIfState(status = 'COMPLETED') AS completed_count,
-    countIfState(status = 'ACTIVE') AS active_count
+    minState(enrolled_at)  AS first_enrolled,
+    maxState(updated_at)   AS last_updated
 FROM protocol_instances
 GROUP BY protocol_definition_id;
 
@@ -103,47 +106,7 @@ AS SELECT
 FROM intelligence_event_logs
 GROUP BY day, action_type, intelligence_destination, step_state, trigger_reason;
 
--- Delivery performance hourly (from intelligence_deliveries CDC)
-CREATE MATERIALIZED VIEW IF NOT EXISTS mv_delivery_performance_hourly
-ENGINE = AggregatingMergeTree()
-PARTITION BY toYYYYMM(hour)
-ORDER BY (adaptor_name, endpoint_url, destination, action_type, severity, hour)
-AS SELECT
-    toStartOfHour(created_at)         AS hour,
-    adaptor_name,
-    endpoint_url,
-    destination,
-    action_type,
-    severity,
-    countState()                       AS total_deliveries,
-    countIfState(status = 'DELIVERED') AS delivered,
-    countIfState(status = 'FAILED')   AS failed,
-    countIfState(status = 'CANCELLED') AS cancelled,
-    avgState(latency_ms)              AS avg_latency_ms,
-    quantileState(0.95)(latency_ms)   AS p95_latency_ms,
-    quantileState(0.99)(latency_ms)   AS p99_latency_ms,
-    maxState(latency_ms)              AS max_latency_ms
-FROM intelligence_deliveries
-WHERE status IN ('DELIVERED', 'FAILED', 'CANCELLED')
-GROUP BY hour, adaptor_name, endpoint_url, destination, action_type, severity;
 
--- ============================================================
--- Step/Scheduler (from step_instances CDC)
--- ============================================================
-
--- Daily step state transitions (from step_instances CDC — state changes captured via ReplacingMergeTree)
-CREATE MATERIALIZED VIEW IF NOT EXISTS mv_step_states_daily
-ENGINE = AggregatingMergeTree()
-PARTITION BY toYYYYMM(day)
-ORDER BY (state, completion_status, day)
-AS SELECT
-    toStartOfDay(updated_at) AS day,
-    state,
-    completion_status,
-    countState() AS step_count,
-    uniqState(protocol_instance_id) AS unique_protocols
-FROM step_instances
-GROUP BY day, state, completion_status;
 
 -- ============================================================
 -- Practitioner Metrics (from inbound_event_logs MATERIALIZED columns)
@@ -190,7 +153,11 @@ GROUP BY day, facility_id, resource_type;
 -- Entity × Behavior Cross-Dimensional Views
 -- ============================================================
 
--- Patient-level compliance (enables: compliance by patient, then resolve facility via dict)
+-- Patient-level compliance: earliest enrollment and most recent update per patient/protocol.
+-- NOTE: total_enrollments / active_count / completed_count are intentionally excluded.
+-- countIfState(status='X') accumulates across every CDC event (INSERT + each UPDATE), so
+-- a single row updated ACTIVE→COMPLETED would produce active_count=1 AND completed_count=1.
+-- For current status breakdown, query protocol_instances FINAL directly.
 CREATE MATERIALIZED VIEW IF NOT EXISTS mv_compliance_by_patient
 ENGINE = AggregatingMergeTree()
 ORDER BY (patient_id, protocol_definition_id)
@@ -198,11 +165,8 @@ AS SELECT
     patient_id,
     protocol_definition_id,
     protocol_canonical,
-    countState() AS total_enrollments,
-    countIfState(status = 'COMPLETED') AS completed_count,
-    countIfState(status = 'ACTIVE') AS active_count,
     minState(enrolled_at) AS first_enrolled,
-    maxState(updated_at) AS last_updated
+    maxState(updated_at)  AS last_updated
 FROM protocol_instances
 GROUP BY patient_id, protocol_definition_id, protocol_canonical;
 
@@ -238,55 +202,8 @@ AS SELECT
 FROM intelligence_event_logs
 GROUP BY day, subject, action_type, intelligence_destination, trigger_reason;
 
--- Patient-level delivery outcomes (enables: delivery success/failure per patient)
-CREATE MATERIALIZED VIEW IF NOT EXISTS mv_delivery_by_patient
-ENGINE = AggregatingMergeTree()
-PARTITION BY toYYYYMM(day)
-ORDER BY (subject, destination, action_type, day)
-AS SELECT
-    toStartOfDay(created_at) AS day,
-    subject,
-    destination,
-    action_type,
-    severity,
-    countState() AS total_deliveries,
-    countIfState(status = 'DELIVERED') AS delivered,
-    countIfState(status = 'FAILED') AS failed
-FROM intelligence_deliveries
-GROUP BY day, subject, destination, action_type, severity;
 
--- Step states with protocol dimension (enables: step timeliness per protocol)
-CREATE MATERIALIZED VIEW IF NOT EXISTS mv_step_states_by_protocol
-ENGINE = AggregatingMergeTree()
-PARTITION BY toYYYYMM(day)
-ORDER BY (protocol_instance_id, state, day)
-AS SELECT
-    toStartOfDay(updated_at) AS day,
-    protocol_instance_id,
-    action_id,
-    state,
-    completion_status,
-    countState() AS step_count
-FROM step_instances
-GROUP BY day, protocol_instance_id, action_id, state, completion_status;
 
--- Step states per patient (JOIN step_instances → protocol_instances for patient_id)
--- LEFT JOIN: if protocol_instances row hasn't arrived yet via CDC, the step is
--- still captured with a NULL patient_id rather than silently dropped.
-CREATE MATERIALIZED VIEW IF NOT EXISTS mv_step_states_by_patient
-ENGINE = AggregatingMergeTree()
-PARTITION BY toYYYYMM(day)
-ORDER BY (patient_id, state, day)
-AS SELECT
-    toStartOfDay(si.updated_at) AS day,
-    coalesce(pi.patient_id, '') AS patient_id,
-    si.state,
-    si.completion_status,
-    countState() AS step_count,
-    uniqState(si.protocol_instance_id) AS unique_protocols
-FROM step_instances si
-LEFT JOIN protocol_instances pi ON si.protocol_instance_id = pi.id
-GROUP BY day, patient_id, si.state, si.completion_status;
 
 -- Intelligence triggers per protocol (enables: "which protocols generate the most alerts?")
 CREATE MATERIALIZED VIEW IF NOT EXISTS mv_intelligence_by_protocol
@@ -304,42 +221,7 @@ AS SELECT
 FROM intelligence_event_logs
 GROUP BY day, protocol_instance_id, action_type, intelligence_destination, trigger_reason;
 
--- Delivery outcomes per protocol (enables: delivery success rate by protocol)
-CREATE MATERIALIZED VIEW IF NOT EXISTS mv_delivery_by_protocol
-ENGINE = AggregatingMergeTree()
-PARTITION BY toYYYYMM(day)
-ORDER BY (protocol_canonical, destination, day)
-AS SELECT
-    toStartOfDay(created_at) AS day,
-    protocol_canonical,
-    destination,
-    action_type,
-    countState() AS total_deliveries,
-    countIfState(status = 'DELIVERED') AS delivered,
-    countIfState(status = 'FAILED') AS failed,
-    uniqState(subject) AS unique_patients
-FROM intelligence_deliveries
-GROUP BY day, protocol_canonical, destination, action_type;
 
--- ============================================================
--- Step Completion Timeliness (ON_TIME / LATE / EARLY counts)
--- ============================================================
-
--- Step completion timeliness per protocol/action/day
--- Enables: "Are steps being completed on time? Which protocols have the most late steps?"
-CREATE MATERIALIZED VIEW IF NOT EXISTS mv_step_completion_timeliness
-ENGINE = SummingMergeTree()
-PARTITION BY toYYYYMM(day)
-ORDER BY (protocol_instance_id, action_id, completion_status, day)
-AS SELECT
-    toStartOfDay(updated_at) AS day,
-    protocol_instance_id,
-    action_id,
-    completion_status,
-    count() AS step_count
-FROM step_instances
-WHERE state = 'COMPLETED' AND completion_status != ''
-GROUP BY day, protocol_instance_id, action_id, completion_status;
 
 -- ============================================================
 -- Compliance Event Processing Quality
@@ -375,3 +257,49 @@ AS SELECT
     received_at AS last_seen
 FROM inbound_event_logs
 WHERE subject != '' AND facility_id != '';
+
+-- ============================================================
+-- Denormalized Current-State Views (ReplacingMergeTree)
+-- ============================================================
+-- These replace AggregatingMergeTree MVs for mutable entity tables.
+-- PeerDB CDC turns every PostgreSQL UPDATE into a new INSERT with an incrementing
+-- _peerdb_version. ReplacingMergeTree(_peerdb_version) retains the latest row per
+-- entity after background merges. Use FINAL in queries for exact current-state counts.
+
+-- Current state of every step instance.
+-- Replaces: mv_step_states_daily, mv_step_states_by_protocol,
+--           mv_step_states_by_patient, mv_step_completion_timeliness
+CREATE MATERIALIZED VIEW IF NOT EXISTS mv_step_current
+ENGINE = ReplacingMergeTree(_peerdb_version)
+ORDER BY (id)
+AS SELECT
+    id,
+    _peerdb_version,
+    protocol_instance_id,
+    action_id,
+    state,
+    completion_status,
+    created_at,
+    updated_at,
+    completed_at
+FROM step_instances;
+
+-- Current state of every intelligence delivery.
+-- Replaces: mv_delivery_performance_hourly, mv_delivery_by_patient, mv_delivery_by_protocol
+CREATE MATERIALIZED VIEW IF NOT EXISTS mv_delivery_current
+ENGINE = ReplacingMergeTree(_peerdb_version)
+ORDER BY (id)
+AS SELECT
+    id,
+    _peerdb_version,
+    subject,
+    protocol_canonical,
+    destination,
+    adaptor_name,
+    endpoint_url,
+    action_type,
+    severity,
+    status,
+    latency_ms,
+    created_at
+FROM intelligence_deliveries;
