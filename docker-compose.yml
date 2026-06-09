@@ -48,7 +48,7 @@ services:
   # Analytics Store
   # ============================================================
   clickhouse:
-    image: clickhouse/clickhouse-server:24.8-alpine
+    image: clickhouse/clickhouse-server:26.3-alpine
     container_name: cce-clickhouse
     ports:
       - "8123:8123"   # HTTP interface

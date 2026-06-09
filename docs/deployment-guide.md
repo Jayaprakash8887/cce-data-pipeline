@@ -305,11 +305,29 @@ clickhouse-client --host "$CH_HOST" --user "$CH_USER" --password "$CH_PASS" \
   --database cce_analytics --multiquery < schema/02-create-materialized-views.sql
 
 clickhouse-client --host "$CH_HOST" --user "$CH_USER" --password "$CH_PASS" \
-  --database cce_analytics --multiquery < schema/03-create-indexes-projections.sql
+  --database cce_analytics --multiquery < schema/03-create-indexes.sql
 
 clickhouse-client --host "$CH_HOST" --user "$CH_USER" --password "$CH_PASS" \
   --database cce_analytics --multiquery < schema/04-create-dictionary.sql
 ```
+
+### Step 4 (OPTIONAL) — Refreshable compliance rollup
+
+`schema/05-refreshable-rollups.sql` pre-aggregates per-enrollment compliance
+(`rollup_protocol_instance_compliance`) to accelerate the hot compliance endpoints
+(dashboard, compliance-summary, patient lists, rankings, hotspots). It is **not** part of
+the core bootstrap. Trade-off: data is stale up to the refresh interval (5 min). Refreshable
+MVs are GA as of ClickHouse 24.10, so on the pinned 26.3 LTS no experimental flag is needed.
+
+```bash
+clickhouse-client --host "$CH_HOST" --user "$CH_USER" --password "$CH_PASS" \
+  --database cce_analytics --multiquery < schema/05-refreshable-rollups.sql
+```
+
+> Why not a projection or count-MV here? Projections are skipped under `FINAL` (the
+> `cce_pipeline` profile sets `final=1`), and count-based MVs on the mutable
+> `step_instances` table double-count CDC state transitions. A periodic full recompute
+> with `FINAL` is the correctness-safe accelerator. See the file header for details.
 
 ### Validate Schema
 ```bash

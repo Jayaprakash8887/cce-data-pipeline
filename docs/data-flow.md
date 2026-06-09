@@ -317,17 +317,19 @@ ORDER BY total_events DESC;
 
 ---
 
-## 5. Indexes & Projections
+## 5. Indexes
 
 ### 5.1 Secondary Indexes
 
-15 bloom filter indexes for fast point lookups on non-ORDER-BY columns. All indexes are materialized via `MATERIALIZE INDEX` to cover existing snapshot data.
+17 bloom filter indexes for fast point lookups on non-ORDER-BY columns. All indexes are materialized via `MATERIALIZE INDEX` to cover existing snapshot data. **Skip indexes prune granules even under `FINAL`**, so they remain effective for the `cce_pipeline` profile (which sets `final=1`).
 
 | Table | Index | Column |
 |-------|-------|--------|
 | `inbound_event_logs` | `idx_cloudevents_id` | `cloudevents_id` |
 | `inbound_event_logs` | `idx_correlation` | `correlation_id` |
 | `inbound_event_logs` | `idx_source` | `source` |
+| `inbound_event_logs` | `idx_subject` | `subject` (patient event history) |
+| `inbound_event_logs` | `idx_facility` | `facility_id` (facility-scoped browse) |
 | `protocol_instances` | `idx_patient_id` | `patient_id` |
 | `protocol_instances` | `idx_protocol_definition` | `protocol_definition_id` |
 | `step_instances` | `idx_protocol_instance` | `protocol_instance_id` |
@@ -341,19 +343,18 @@ ORDER BY total_events DESC;
 | `intelligence_deliveries` | `idx_status` | `status` |
 | `intelligence_deliveries` | `idx_subject` | `subject` |
 
-### 5.2 Projections
+### 5.2 Why no projections
 
-7 projections provide alternative sort orders without separate tables. All are materialized via `MATERIALIZE PROJECTION` to cover existing snapshot data.
+This pipeline uses **no projections**. ClickHouse skips projections whenever a query uses
+`FINAL`, and the `cce_pipeline` analytics profile sets `final=1` — so projections would never
+be used by `cce-insights-service`, while each `SELECT *` projection costs a full extra sorted
+copy of the table (prohibitive on `inbound_event_logs`, which stores the large `raw_payload`
+blob). The access patterns a projection would serve are instead covered by the skip indexes
+above (which work under `FINAL`), and per-enrollment compliance rollups by the optional
+refreshable table in `schema/05` (see [Deployment Guide § Step 4](deployment-guide.md#step-4-optional--refreshable-compliance-rollup)).
 
-| Table | Projection | Order By | Use Case |
-|-------|-----------|----------|----------|
-| `inbound_event_logs` | `prj_patient_timeline` | `(subject, received_at)` | Patient event history |
-| `inbound_event_logs` | `prj_facility_timeline` | `(facility_id, received_at, subject)` | Facility-scoped event queries |
-| `protocol_instances` | `prj_protocol_lookup` | `(protocol_definition_id, status)` | Protocol-level compliance rollups |
-| `protocol_instances` | `prj_patient_lookup` | `(patient_id, status)` | Patient-centric compliance queries |
-| `step_instances` | `prj_steps_by_protocol` | `(protocol_instance_id, state, updated_at)` | Compliance/scheduler JOIN access pattern |
-| `deviations` | `prj_protocol_deviations` | `(protocol_instance_id, deviation_type, detected_at)` | Protocol deviation drill-down |
-| `deviations` | `prj_step_deviations` | `(step_instance_id, detected_at)` | Step-level deviation join |
+> If you later run heavy **non-FINAL** analytical scans under a different profile, projections
+> could help there — but they are intentionally omitted for the current `final=1` access path.
 
 ---
 
@@ -562,6 +563,9 @@ LIMIT 20;
 -- Query protocol_instances FINAL for live status counts.
 -- mv_compliance_summary only stores first_enrolled / last_updated because
 -- countIfState(status='X') double-counts rows that were ever updated via CDC.
+-- For per-enrollment step compliance (completed/total), prefer the optional
+-- pre-aggregated rollup `rollup_protocol_instance_compliance` (schema/05) instead of
+-- scanning step_instances FINAL on every request — see deployment-guide.md § Step 4.
 SELECT
     pi.protocol_canonical,
     count()                                                                AS total,

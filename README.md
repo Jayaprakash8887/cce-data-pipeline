@@ -16,7 +16,7 @@ PostgreSQL (ccedb) → PeerDB (logical replication) → ClickHouse (MVs)
 
 | Component | Version | Purpose |
 |-----------|---------|---------|
-| ClickHouse | 24.8 LTS | Columnar OLAP analytics store (serving layer for insights-service) |
+| ClickHouse | 26.3 LTS | Columnar OLAP analytics store (serving layer for insights-service) |
 | PeerDB | stable-v0.36.26 (OSS) | CDC from PostgreSQL (WAL-based, direct to ClickHouse). Full stack: nexus + flow-api + workers + temporal + MinIO |
 | Grafana | 11.x | Pipeline health monitoring (host port **3001**) |
 | Prometheus | 2.53 | Metrics collection |
@@ -57,7 +57,7 @@ psql -h "$PG_HOST" -U postgres -d ccedb -f cdc/01-configure-replication.sql
 # Step 4 — Wait for initial snapshot, then create MVs, indexes, and dictionaries
 ./scripts/check-connector-health.sh
 clickhouse-client --database cce_analytics --multiquery < schema/02-create-materialized-views.sql
-clickhouse-client --database cce_analytics --multiquery < schema/03-create-indexes-projections.sql
+clickhouse-client --database cce_analytics --multiquery < schema/03-create-indexes.sql
 clickhouse-client --database cce_analytics --multiquery < schema/04-create-dictionary.sql
 ```
 

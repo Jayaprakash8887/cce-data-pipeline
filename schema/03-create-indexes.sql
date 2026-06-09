@@ -1,6 +1,12 @@
 -- CCE Analytics ClickHouse Schema
--- Secondary indexes, projections, and TTL policies
--- Run: clickhouse-client --database cce_analytics < schema/03-create-indexes-projections.sql
+-- Secondary indexes and TTL policies
+-- Run: clickhouse-client --database cce_analytics < schema/03-create-indexes.sql
+--
+-- NOTE: No projections. Projections are skipped by ClickHouse when FINAL is applied, and the
+-- cce_pipeline analytics profile sets final=1 — so projections would never be used by
+-- cce-insights-service queries, while costing a full extra sorted copy of each table
+-- (prohibitive on inbound_event_logs, which carries the large raw_payload blob). Skip indexes
+-- (bloom_filter), by contrast, DO prune granules under FINAL, so point lookups use these instead.
 
 USE cce_analytics;
 
@@ -12,6 +18,8 @@ USE cce_analytics;
 ALTER TABLE inbound_event_logs ADD INDEX IF NOT EXISTS idx_cloudevents_id     cloudevents_id    TYPE bloom_filter GRANULARITY 4;
 ALTER TABLE inbound_event_logs ADD INDEX IF NOT EXISTS idx_correlation         correlation_id    TYPE bloom_filter GRANULARITY 4;
 ALTER TABLE inbound_event_logs ADD INDEX IF NOT EXISTS idx_source              source            TYPE bloom_filter GRANULARITY 4;
+ALTER TABLE inbound_event_logs ADD INDEX IF NOT EXISTS idx_subject             subject           TYPE bloom_filter GRANULARITY 4;  -- patient event history (/patients/{id}/events)
+ALTER TABLE inbound_event_logs ADD INDEX IF NOT EXISTS idx_facility            facility_id       TYPE bloom_filter GRANULARITY 4;  -- facility-scoped raw event browse
 
 -- protocol_instances
 ALTER TABLE protocol_instances ADD INDEX IF NOT EXISTS idx_patient_id          patient_id                TYPE bloom_filter GRANULARITY 4;
@@ -42,6 +50,8 @@ ALTER TABLE intelligence_deliveries ADD INDEX IF NOT EXISTS idx_subject         
 ALTER TABLE inbound_event_logs MATERIALIZE INDEX idx_cloudevents_id;
 ALTER TABLE inbound_event_logs MATERIALIZE INDEX idx_correlation;
 ALTER TABLE inbound_event_logs MATERIALIZE INDEX idx_source;
+ALTER TABLE inbound_event_logs MATERIALIZE INDEX idx_subject;
+ALTER TABLE inbound_event_logs MATERIALIZE INDEX idx_facility;
 
 ALTER TABLE protocol_instances MATERIALIZE INDEX idx_patient_id;
 ALTER TABLE protocol_instances MATERIALIZE INDEX idx_protocol_definition;
@@ -59,66 +69,6 @@ ALTER TABLE intelligence_event_logs MATERIALIZE INDEX idx_protocol_instance;
 ALTER TABLE intelligence_deliveries MATERIALIZE INDEX idx_intelligence_event;
 ALTER TABLE intelligence_deliveries MATERIALIZE INDEX idx_status;
 ALTER TABLE intelligence_deliveries MATERIALIZE INDEX idx_subject;
-
--- ============================================================
--- PROJECTIONS (alternative sort orders for common access patterns)
--- ============================================================
-
--- Patient timeline: sorted by patient for fast single-patient event queries
-ALTER TABLE inbound_event_logs ADD PROJECTION IF NOT EXISTS prj_patient_timeline (
-    SELECT *
-    ORDER BY (subject, received_at)
-);
-
--- Facility timeline: sorted by facility for facility-scoped event queries
-ALTER TABLE inbound_event_logs ADD PROJECTION IF NOT EXISTS prj_facility_timeline (
-    SELECT *
-    ORDER BY (facility_id, received_at, subject)
-);
-
--- Protocol enrollment lookup: optimized for protocol-level compliance rollups
-ALTER TABLE protocol_instances ADD PROJECTION IF NOT EXISTS prj_protocol_lookup (
-    SELECT *
-    ORDER BY (protocol_definition_id, status)
-);
-
--- Patient enrollment lookup: optimized for patient-centric compliance queries
--- (protocol_instances ORDER BY is (id); patient_id lookups need this projection)
-ALTER TABLE protocol_instances ADD PROJECTION IF NOT EXISTS prj_patient_lookup (
-    SELECT *
-    ORDER BY (patient_id, status)
-);
-
--- Step instances by protocol: most common JOIN/filter access pattern
--- (step_instances ORDER BY is (id); all compliance/scheduler queries filter by protocol_instance_id)
-ALTER TABLE step_instances ADD PROJECTION IF NOT EXISTS prj_steps_by_protocol (
-    SELECT *
-    ORDER BY (protocol_instance_id, state, updated_at)
-);
-
--- Protocol deviations: optimized for deviation drill-downs by protocol
-ALTER TABLE deviations ADD PROJECTION IF NOT EXISTS prj_protocol_deviations (
-    SELECT *
-    ORDER BY (protocol_instance_id, deviation_type, detected_at)
-);
-
--- Deviations by step: optimized for dashboard 03's step-level deviation join
-ALTER TABLE deviations ADD PROJECTION IF NOT EXISTS prj_step_deviations (
-    SELECT *
-    ORDER BY (step_instance_id, detected_at)
-);
-
--- ============================================================
--- MATERIALIZE PROJECTIONS (backfill for initial snapshot data)
--- ============================================================
-
-ALTER TABLE inbound_event_logs  MATERIALIZE PROJECTION prj_patient_timeline;
-ALTER TABLE inbound_event_logs  MATERIALIZE PROJECTION prj_facility_timeline;
-ALTER TABLE protocol_instances  MATERIALIZE PROJECTION prj_protocol_lookup;
-ALTER TABLE protocol_instances  MATERIALIZE PROJECTION prj_patient_lookup;
-ALTER TABLE step_instances      MATERIALIZE PROJECTION prj_steps_by_protocol;
-ALTER TABLE deviations          MATERIALIZE PROJECTION prj_protocol_deviations;
-ALTER TABLE deviations          MATERIALIZE PROJECTION prj_step_deviations;
 
 -- ============================================================
 -- TTL POLICIES (storage retention for high-volume log tables)

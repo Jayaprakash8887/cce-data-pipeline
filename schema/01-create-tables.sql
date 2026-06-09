@@ -12,7 +12,7 @@
 --   2. Create PeerDB mirror (see connectors/peerdb-mirror.sql) — PeerDB uses existing tables
 --   3. Wait for initial snapshot to complete
 --   4. Run schema/02-create-materialized-views.sql
---   5. Run schema/03-create-indexes-projections.sql
+--   5. Run schema/03-create-indexes.sql
 --   6. Run schema/04-create-dictionary.sql
 
 CREATE DATABASE IF NOT EXISTS cce_analytics;

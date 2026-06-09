@@ -79,7 +79,7 @@ graph TB
 |-------|-----------|---------|---------|---------|
 | Change Data Capture | PeerDB | stable-v0.36.26 | Apache 2.0 | WAL replication from PostgreSQL to ClickHouse (full OSS stack in docker-compose.yml) |
 | Object Storage | MinIO | latest | AGPL 3.0 | **Mandatory** S3-compatible Avro staging for the PeerDB→ClickHouse load (swappable to AWS S3) |
-| Analytics Database | ClickHouse | 24.8 LTS | Apache 2.0 | Columnar OLAP with MATERIALIZED columns + MVs; serving layer for insights-service |
+| Analytics Database | ClickHouse | 26.3 LTS | Apache 2.0 | Columnar OLAP with MATERIALIZED columns + MVs; serving layer for insights-service |
 | Operational Monitoring | Grafana | 11.x | AGPL 3.0 | Infrastructure & pipeline health monitoring |
 | Metrics | Prometheus | 2.53 | Apache 2.0 | Metrics collection from services |
 
@@ -92,7 +92,7 @@ graph TB
 | Component | Minimum Version | Tested Version | Notes |
 |-----------|----------------|----------------|-------|
 | PeerDB | stable-v0.36.26 | stable-v0.36.26 | OSS self-hosted; pinned in docker-compose.yml + infra/peerdb/ |
-| ClickHouse | 23.2 | 24.8 LTS | 23.2+ required for `clean_deleted_rows = 'Always'` |
+| ClickHouse | 23.2 | 26.3 LTS | 23.2+ for `clean_deleted_rows`; 24.10+ for GA refreshable MVs (schema/05) |
 | Grafana | 10.0 | 11.2 | With ClickHouse plugin |
 | PostgreSQL (source) | 14 | 16 | Existing CCE database (`ccedb`) |
 | Prometheus | 2.45 | 2.53 | Metrics collection |
@@ -130,7 +130,7 @@ the apps own presentation and query ClickHouse via the `cce_pipeline` user.
 - No Kafka buffer — PeerDB stalling means WAL growth on PostgreSQL (mitigated by `max_slot_wal_keep_size=10GB` and WAL monitoring alerts)
 - No DLQ — replication errors require investigation at the PeerDB level
 - No multi-consumer CDC topics — other services cannot tap into a Kafka topic (acceptable: no downstream consumers needed)
-- Table ORDER BY determined by PostgreSQL primary keys — mitigated by projections for common access patterns
+- Table ORDER BY determined by PostgreSQL primary keys (`id`) — mitigated by bloom-filter skip indexes on common filter columns (which work under `FINAL`)
 
 ---
 
@@ -156,8 +156,8 @@ All 11 CDC tables reside in the shared `ccedb` PostgreSQL database. A single Pee
 - **AggregatingMergeTree** — Correct incremental aggregation with `-State`/`-Merge` combinators (event logs, deviations — append-only sources only)
 - **SummingMergeTree** — Simple additive rollups (counts per hour/day)
 - **Dictionaries** — Fast key-value lookups replacing JOINs (3 dictionaries, all using `QUERY...FINAL` sources)
-- **Projections** — Alternative sort orders for common access patterns (7 projections)
-- **Bloom filter indexes** — 15 secondary indexes for fast point lookups on non-ORDER-BY columns
+- **Bloom filter indexes** — 17 secondary indexes for fast point lookups on non-ORDER-BY columns (effective under `FINAL`)
+- **No projections** — projections are skipped under `FINAL` (the serving profile sets `final=1`), so they are intentionally omitted; skip indexes cover point lookups instead
 - **CODEC compression** — LZ4/ZSTD for 10-40x compression on event data
 - **TTL** — 90-day hot retention on 4 high-volume log tables (inbound_event_logs, intelligence_event_logs, intelligence_deliveries, compliance_event_logs)
 - **User profiles** — `analytics` (readonly, `final=1` auto-applied) for `cce-insights-service`; `peerdb_writer` (write access, no FINAL overhead) for PeerDB CDC writes
