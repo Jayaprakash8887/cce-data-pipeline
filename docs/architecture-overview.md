@@ -14,6 +14,7 @@ graph TB
 
     subgraph Pipeline["CCE Data Pipeline (this repo)"]
         PEERDB["PeerDB<br/>(WAL Replication)"]
+        MINIO["MinIO / S3<br/>(Avro staging — mandatory)"]
         CLICKHOUSE["ClickHouse<br/>(OLAP Analytics Store)"]
     end
 
@@ -33,7 +34,8 @@ graph TB
     INTELLIGENCE --> PG
 
     PG -->|"CDC (WAL)"| PEERDB
-    PEERDB -->|"Direct WAL replication"| CLICKHOUSE
+    PEERDB -->|"Avro stage"| MINIO
+    MINIO -->|"s3() load"| CLICKHOUSE
     CLICKHOUSE -->|"SQL (HTTP/native)"| INSIGHTS
 
     INSIGHTS --> OPS
@@ -46,7 +48,7 @@ graph TB
     classDef users fill:#27AE60,stroke:#1E8449,color:white
 
     class COLLECTOR,COMPLIANCE,SCHEDULER,INTELLIGENCE,PG existing
-    class PEERDB,CLICKHOUSE pipeline
+    class PEERDB,MINIO,CLICKHOUSE pipeline
     class INSIGHTS presentation
     class OPS,CLINICAL,ADMIN users
 ```
@@ -75,7 +77,8 @@ graph TB
 
 | Layer | Technology | Version | License | Purpose |
 |-------|-----------|---------|---------|---------|
-| Change Data Capture | PeerDB | stable-v0.36.26 | Apache 2.0 | Direct WAL replication from PostgreSQL to ClickHouse (full OSS stack in docker-compose.yml) |
+| Change Data Capture | PeerDB | stable-v0.36.26 | Apache 2.0 | WAL replication from PostgreSQL to ClickHouse (full OSS stack in docker-compose.yml) |
+| Object Storage | MinIO | latest | AGPL 3.0 | **Mandatory** S3-compatible Avro staging for the PeerDB→ClickHouse load (swappable to AWS S3) |
 | Analytics Database | ClickHouse | 24.8 LTS | Apache 2.0 | Columnar OLAP with MATERIALIZED columns + MVs; serving layer for insights-service |
 | Operational Monitoring | Grafana | 11.x | AGPL 3.0 | Infrastructure & pipeline health monitoring |
 | Metrics | Prometheus | 2.53 | Apache 2.0 | Metrics collection from services |
@@ -135,7 +138,7 @@ the apps own presentation and query ClickHouse via the `cce_pipeline` user.
 
 ### 4.1 CDC Layer (PeerDB)
 
-**PeerDB** connects directly to PostgreSQL's logical replication stream and writes to ClickHouse using an intermediary S3/MinIO stage for performance. All 11 ClickHouse tables are **pre-created** via `schema/01-create-tables.sql` with `ReplacingMergeTree(_peerdb_version, _peerdb_is_deleted)` and `SETTINGS clean_deleted_rows = 'Always'` before the PeerDB mirror is started. PeerDB writes into existing tables and does not recreate them. MATERIALIZED columns for JSON extraction are defined inline in the table DDL.
+**PeerDB** connects directly to PostgreSQL's logical replication stream and loads ClickHouse via a **mandatory** S3/MinIO Avro staging step: `flow-worker` writes each CDC batch as Avro to the bucket, and ClickHouse pulls it in with the `s3()` function (there is no direct-insert path for the ClickHouse destination). All 11 ClickHouse tables are **pre-created** via `schema/01-create-tables.sql` with `ReplacingMergeTree(_peerdb_version, _peerdb_is_deleted)` and `SETTINGS clean_deleted_rows = 'Always'` before the PeerDB mirror is started. PeerDB writes into existing tables and does not recreate them. MATERIALIZED columns for JSON extraction are defined inline in the table DDL. For staging details and the AWS S3 swap, see [Data Flow § 2.3](data-flow.md#23-s3minio-staging).
 
 All 11 CDC tables reside in the shared `ccedb` PostgreSQL database. A single PeerDB mirror replicates all tables. For the full table listing, mirror config, and schema details, see [Data Flow & Schema Design](data-flow.md).
 
@@ -192,8 +195,9 @@ to scrape it (the `peerdb` scrape job in `infra/prometheus/prometheus.yml` is le
 
 ```mermaid
 flowchart TD
-    PG["PostgreSQL (existing)"] -->|"Logical replication (WAL)"| PEERDB["PeerDB"]
-    PEERDB -->|"Direct insert"| CLICKHOUSE["ClickHouse"]
+    PG["PostgreSQL (existing)"] -->|"Logical replication (WAL)"| PEERDB["PeerDB (flow-worker)"]
+    PEERDB -->|"writes Avro"| MINIO["MinIO / S3<br/>(Avro staging — mandatory)"]
+    MINIO -->|"s3() load"| CLICKHOUSE["ClickHouse"]
 
     CLICKHOUSE -->|"SQL"| INSIGHTS["cce-insights-service / ui (external)"]
     CLICKHOUSE --> GRAFANA["Grafana"]
@@ -203,6 +207,7 @@ flowchart TD
 
     style PG fill:#27AE60,stroke:#1E8449,color:white
     style PEERDB fill:#4A90D9,stroke:#2C5F8A,color:white
+    style MINIO fill:#4A90D9,stroke:#2C5F8A,color:white
     style CLICKHOUSE fill:#4A90D9,stroke:#2C5F8A,color:white
     style INSIGHTS fill:#9B59B6,stroke:#8E44AD,color:white
     style GRAFANA fill:#9B59B6,stroke:#8E44AD,color:white

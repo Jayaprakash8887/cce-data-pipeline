@@ -11,7 +11,8 @@ flowchart LR
     end
 
     subgraph CDC
-        PEER["PeerDB<br/>(Logical Replication)"]
+        PEER["PeerDB<br/>(flow-worker)"]
+        MINIO["MinIO / S3<br/>(Avro staging — mandatory)"]
     end
 
     subgraph Analytics
@@ -24,11 +25,17 @@ flowchart LR
     end
 
     PG -->|WAL| PEER
-    PEER -->|S3/MinIO stage| CH
+    PEER -->|"writes Avro batches"| MINIO
+    MINIO -->|"ClickHouse s3() load"| CH
     CH -->|INSERT triggers| MV
     CH --> SVC
     MV --> SVC
 ```
+
+> **MinIO is required, not optional.** PeerDB's ClickHouse connector does not stream rows
+> directly — `flow-worker` stages each CDC batch as Avro files in an S3-compatible bucket,
+> then ClickHouse pulls them via the `s3()` table function. MinIO provides that bucket
+> (swappable for AWS S3). See [§2.3 S3/MinIO Staging](#23-s3minio-staging).
 
 **Core principle:** Analytics should be purely on committed data in the database. This ensures:
 - No discrepancies from in-flight events that may be rejected
@@ -41,7 +48,7 @@ flowchart LR
 
 ### 2.1 PeerDB Mirror (PostgreSQL → ClickHouse)
 
-PeerDB reads the PostgreSQL Write-Ahead Log (WAL) via logical replication and writes directly to ClickHouse using an S3/MinIO intermediary stage for performance.
+PeerDB reads the PostgreSQL Write-Ahead Log (WAL) via logical replication and loads ClickHouse through a mandatory **S3/MinIO Avro staging** step (see §2.3).
 
 **Configuration** (see `connectors/peerdb-mirror.sql`):
 - Replication slot: `cce_analytics_slot`
@@ -84,6 +91,24 @@ All 11 ClickHouse tables are **pre-created** via `schema/01-create-tables.sql` b
 - PeerDB sets `_peerdb_is_deleted=1` (soft-delete flag) for PostgreSQL DELETEs (`soft_delete=true` in mirror config)
 - `clean_deleted_rows = 'Always'` physically removes deleted rows during background merges — no `WHERE _peerdb_is_deleted = false` filter needed in queries
 - The `cce_pipeline` user profile has `final=1` so all reads from `cce-insights-service` (and ad-hoc queries) automatically apply FINAL
+
+### 2.3 S3/MinIO Staging
+
+PeerDB's ClickHouse destination is **not** a direct row stream — it is a stage-and-load
+pipeline that **requires** an S3-compatible object store:
+
+1. `flow-worker` serializes each CDC batch (and the initial snapshot) to **Avro** files.
+2. It uploads those files to the staging bucket (`peerdbbucket`).
+3. ClickHouse reads them back with the `s3()` table function and inserts into the target table.
+
+Implications:
+- **The object store is mandatory** for this pipeline; without it the mirror cannot load ClickHouse.
+- The endpoint (`http://minio:9000` in compose) must be reachable by **both** `flow-worker`
+  (writes) **and** ClickHouse (reads). On the shared Docker network both use the `minio` service name.
+- Configured via `PEERDB_CLICKHOUSE_AWS_CREDENTIALS_AWS_*` on the flow services
+  (endpoint, access key, secret, region, bucket).
+- **MinIO ↔ AWS S3 is an env swap**, not a topology change: point those vars at AWS, set
+  `AWS_*`, drop the `minio` service. See [Deployment Guide § MinIO vs S3](deployment-guide.md#minio-vs-s3).
 
 ---
 
