@@ -74,7 +74,7 @@ For full table listing and schema details, see [Data Flow & Schema Design](docs/
 
 ## Materialized Views
 
-**12 pre-aggregated views** computed at insert time, covering event volume, deviations, intelligence, and processing quality — across patient, facility, practitioner, and protocol dimensions. Compliance/step/delivery **current-state** queries run directly against `protocol_instances FINAL`, `step_instances FINAL`, and `intelligence_deliveries FINAL` (mutable tables can't be safely pre-counted via MVs); the optional `schema/05` refreshable rollup accelerates the hot compliance path.
+**12 pre-aggregated views** computed at insert time, covering event volume, deviations, intelligence, and processing quality — across patient, facility, practitioner, and protocol dimensions. **Current-state** queries (compliance status, step rates, delivery outcomes) on the mutable entities use the always-fresh **`argMaxState` current-state rollups** in `schema/05` — incremental, no `FINAL`, no double-counting — or query the base tables with `FINAL` directly.
 
 For the complete MV catalog and coverage matrix, see [Data Flow & Schema Design § 4](docs/data-flow.md).
 
@@ -106,4 +106,4 @@ For the complete MV catalog and coverage matrix, see [Data Flow & Schema Design 
 | `scripts/validate-clickhouse.sh` | Validate all tables and MVs exist |
 | `scripts/data-quality-checks.sh` | Row counts, freshness, integrity checks |
 | `scripts/validate-cdc-config.sh` | Validate PostgreSQL logical-replication config |
-| `scripts/replay-dlq.sh` | Drop + re-snapshot the mirror |
+| `scripts/resnapshot-mirror.sh` | Drop + re-snapshot the mirror |

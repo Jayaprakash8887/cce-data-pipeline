@@ -50,8 +50,8 @@ GROUP BY hour, facility_id, source, event_type, resource_type;
 -- NOTE: there is intentionally NO compliance-count MV here. Status counts and step
 -- compliance rates require CURRENT state from the mutable protocol_instances /
 -- step_instances tables, which an incremental MV cannot maintain without double-counting
--- CDC UPDATE events. Query those tables with FINAL, or use the optional pre-aggregated
--- rollup_protocol_instance_compliance (schema/05-refreshable-rollups.sql) for the hot path.
+-- CDC UPDATE events. Query those tables with FINAL, or use the always-fresh argMaxState
+-- current-state rollups (schema/05-current-state-rollups.sql) for the hot path.
 
 -- Daily deviation counts by type
 CREATE TABLE IF NOT EXISTS mv_deviation_trends (

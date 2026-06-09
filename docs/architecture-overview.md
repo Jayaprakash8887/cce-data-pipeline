@@ -92,7 +92,7 @@ graph TB
 | Component | Minimum Version | Tested Version | Notes |
 |-----------|----------------|----------------|-------|
 | PeerDB | stable-v0.36.26 | stable-v0.36.26 | OSS self-hosted; pinned in docker-compose.yml + infra/peerdb/ |
-| ClickHouse | 23.2 | 26.3 LTS | 23.2+ for `clean_deleted_rows`; 24.10+ for GA refreshable MVs (schema/05) |
+| ClickHouse | 23.2 | 26.3 LTS | 23.2+ for `clean_deleted_rows = 'Always'` (two-parameter ReplacingMergeTree) |
 | Grafana | 10.0 | 11.2 | With ClickHouse plugin |
 | PostgreSQL (source) | 14 | 16 | Existing CCE database (`ccedb`) |
 | Prometheus | 2.45 | 2.53 | Metrics collection |
@@ -222,7 +222,7 @@ flowchart TD
 | **Event Volume** | Events by resource type, facility, source, practitioner | `inbound_event_logs` → `mv_event_volume_hourly/daily` |
 | **Facility Ranking** | Event volume, unique patients, unique practitioners per facility | `inbound_event_logs` → `mv_facility_summary` |
 | **Practitioner Activity** | Events per practitioner, patient coverage, resource types | `inbound_event_logs` → `mv_practitioner_summary` |
-| **Compliance** | Adherence rate, on-track/at-risk/non-compliant counts | `protocol_instances FINAL` + `step_instances FINAL` (or `schema/05` rollup) |
+| **Compliance** | Adherence rate, on-track/at-risk/non-compliant counts | `rollup_protocol_instance_current` + `rollup_step_current` (argMaxState, schema/05) — or base tables with `FINAL` |
 | **Deviations** | Overdue/missed counts, trends, by protocol/patient | `deviations` → `mv_deviation_trends`, `mv_deviation_by_protocol`, `mv_deviation_by_patient` |
 | **Ingestion Quality** | Acceptance rate, rejection reasons, source quality | `inbound_event_logs` → `mv_ingestion_quality` |
 | **Intelligence & Triggers** | Trigger volume by action type, destination, reason | `intelligence_event_logs` → `mv_intelligence_summary`, `mv_intelligence_by_patient/protocol` |

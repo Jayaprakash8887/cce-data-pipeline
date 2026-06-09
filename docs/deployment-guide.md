@@ -307,23 +307,28 @@ clickhouse-client --host "$CH_HOST" --user "$CH_USER" --password "$CH_PASS" \
   --database cce_analytics --multiquery < schema/04-create-dictionary.sql
 ```
 
-### Step 4 (OPTIONAL) — Refreshable compliance rollup
+### Step 4 — Current-state rollups (recommended)
 
-`schema/05-refreshable-rollups.sql` pre-aggregates per-enrollment compliance
-(`rollup_protocol_instance_compliance`) to accelerate the hot compliance endpoints
-(dashboard, compliance-summary, patient lists, rankings, hotspots). It is **not** part of
-the core bootstrap. Trade-off: data is stale up to the refresh interval (5 min). Refreshable
-MVs are GA as of ClickHouse 24.10, so on the pinned 26.3 LTS no experimental flag is needed.
+`schema/05-current-state-rollups.sql` adds `argMaxState` MVs that keep one current row per
+mutable entity — `rollup_protocol_instance_current`, `rollup_step_current`,
+`rollup_delivery_current` — to accelerate the hot current-state endpoints (compliance summary,
+outcome distribution, patient lists, rankings, hotspots, adaptor performance) **without `FINAL`**.
+They are **incremental and always fresh** (no staleness), and use no experimental features.
 
 ```bash
 clickhouse-client --host "$CH_HOST" --user "$CH_USER" --password "$CH_PASS" \
-  --database cce_analytics --multiquery < schema/05-refreshable-rollups.sql
+  --database cce_analytics --multiquery < schema/05-current-state-rollups.sql
 ```
 
-> Why not a projection or count-MV here? Projections are skipped under `FINAL` (the
-> `cce_pipeline` profile sets `final=1`), and count-based MVs on the mutable
-> `step_instances` table double-count CDC state transitions. A periodic full recompute
-> with `FINAL` is the correctness-safe accelerator. See the file header for details.
+> **Why this and not a projection, count-MV, or refreshable MV?** Projections are skipped under
+> `FINAL` (the `cce_pipeline` profile sets `final=1`); count-based MVs on mutable tables
+> double-count CDC UPDATEs; a refreshable MV would be stale between refreshes.
+> `AggregatingMergeTree + argMaxState(col, _peerdb_version)` dedups by version on read via
+> `argMaxMerge()` — incremental, correct, and live. Reports use a nested GROUP BY and must
+> filter `WHERE is_deleted = 0`; see the file header for query templates.
+>
+> Trade-off: one extra MV write per CDC event on these tables (write amplification, mostly on
+> `step_instances`). Acceptable for fast, fresh current-state reads.
 
 ### Validate Schema
 ```bash
@@ -424,7 +429,7 @@ and truncates the MV backing tables first to avoid double-counting:
 
 ```bash
 set -a; source .env; set +a
-./scripts/replay-dlq.sh
+./scripts/resnapshot-mirror.sh
 ```
 
 The script drops `cce_analytics_mirror`, truncates the `mv_*` backing tables, then recreates

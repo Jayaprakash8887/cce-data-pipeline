@@ -10,17 +10,19 @@ definition of how each metric is computed, for the insights-service to reuse.
 
 ## Conventions
 
-- **Current-state counts** (status breakdowns, step states, delivery outcomes) query the
-  base tables with `FINAL` (e.g. `protocol_instances FINAL`, `step_instances FINAL`,
-  `intelligence_deliveries FINAL`) — never the removed count-based MVs, which double-counted
-  CDC UPDATE events. See [data-flow.md § 4](../data-flow.md).
+- **Current-state counts** (status breakdowns, step states, delivery outcomes) — prefer the
+  always-fresh `argMaxState` **current-state rollups** in [`schema/05`](../../schema/05-current-state-rollups.sql):
+  `rollup_protocol_instance_current`, `rollup_step_current`, `rollup_delivery_current`. Resolve
+  the current value per entity with a nested `GROUP BY ... argMaxMerge(col)` and **always filter
+  `WHERE is_deleted = 0`** (templates in the schema/05 header). These avoid `FINAL` and never
+  double-count. The `.sql` files below still show the equivalent `... FINAL` base-table form,
+  which is correct too (just heavier) — never use the removed count-based MVs.
 - **Pre-aggregated trends/volumes** read the materialized-view backing tables
   (`mv_event_volume_hourly`, `mv_deviation_trends`, `mv_ingestion_quality`, etc.).
 - `AggregatingMergeTree` MVs require `-Merge` combinators at query time
-  (`uniqMerge`, `countMerge`, …).
-- The `cce_pipeline` ClickHouse user runs with `final = 1`, so ad-hoc reads dedupe
-  automatically; explicit `FINAL` in these files documents intent and keeps them correct
-  under any profile.
+  (`uniqMerge`, `countMerge`, `argMaxMerge`, …).
+- The `cce_pipeline` ClickHouse user runs with `final = 1`, so ad-hoc reads of the base tables
+  dedupe automatically; explicit `FINAL` in these files documents intent under any profile.
 
 ## Files
 

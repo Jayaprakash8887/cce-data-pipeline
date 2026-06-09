@@ -6,36 +6,23 @@ groups:
     folder: CCE Data Pipeline
     interval: 60s
     rules:
-      - uid: peerdb-mirror-not-running
-        title: "PeerDB Mirror Not Running"
+      # CDC liveness via the PostgreSQL replication slot: when PeerDB stops consuming the
+      # slot, `active` flips to false. This is the source-side proxy for "mirror down".
+      # (PeerDB v0.36.26 exposes its own metrics via OpenTelemetry, not Prometheus; if you
+      #  run an OTel collector you can additionally alert on peerdb_flow_status/cdc_lag.)
+      - uid: cdc-slot-inactive
+        title: "CDC Replication Slot Inactive"
         condition: A
         data:
           - refId: A
-            datasourceUid: prometheus
+            datasourceUid: postgresql
             model:
-              expr: "peerdb_flow_status{flow_name=\"cce_analytics_mirror\"} != 1"
-              intervalMs: 60000
-        for: 5m
+              rawSql: "SELECT count() FROM pg_replication_slots WHERE slot_name = 'cce_analytics_slot' AND active = false"
+        for: 2m
         annotations:
-          summary: "PeerDB CDC mirror is not running"
-          description: "Mirror status: {{ $value }} (0=error, 1=running, 2=paused)"
+          summary: "PeerDB is not consuming the cce_analytics_slot replication slot (CDC stalled)"
         labels:
           severity: critical
-
-      - uid: peerdb-cdc-lag-high
-        title: "PeerDB CDC Lag High"
-        condition: A
-        data:
-          - refId: A
-            datasourceUid: prometheus
-            model:
-              expr: "peerdb_cdc_lag_seconds{flow_name=\"cce_analytics_mirror\"} > 60"
-              intervalMs: 60000
-        for: 10m
-        annotations:
-          summary: "PeerDB CDC lag exceeds 60 seconds"
-        labels:
-          severity: warning
 
       - uid: e2e-latency-high
         title: "End-to-End Latency High"
@@ -80,17 +67,18 @@ groups:
         labels:
           severity: warning
 
-      - uid: peerdb-sync-errors
-        title: "PeerDB Sync Errors"
+      # ClickHouse-side freshness proxy for a stalled mirror: at ~7 events/sec sustained,
+      # zero inbound rows for 10 minutes means CDC has stopped delivering.
+      - uid: clickhouse-insert-stall
+        title: "ClickHouse Insert Stall"
         condition: A
         data:
           - refId: A
-            datasourceUid: prometheus
+            datasourceUid: clickhouse
             model:
-              expr: "increase(peerdb_sync_errors_total{flow_name=\"cce_analytics_mirror\"}[5m]) > 0"
-              intervalMs: 60000
-        for: 2m
+              rawSql: "SELECT count() = 0 FROM cce_analytics.inbound_event_logs WHERE received_at >= now() - INTERVAL 10 MINUTE"
+        for: 5m
         annotations:
-          summary: "PeerDB mirror encountered sync errors"
+          summary: "No inbound events landed in ClickHouse for 10 minutes (CDC may be stalled)"
         labels:
           severity: warning

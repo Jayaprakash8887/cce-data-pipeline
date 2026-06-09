@@ -5,7 +5,7 @@
 # Use when: replication slot was dropped, ClickHouse data is corrupted/truncated,
 # or schema diverged beyond what ALTER TABLE can fix.
 #
-# Usage: ./scripts/replay-dlq.sh
+# Usage: ./scripts/resnapshot-mirror.sh
 #
 # WARNING: This re-snapshots all CDC tables from PostgreSQL. The initial snapshot
 # may take minutes to hours depending on data volume.

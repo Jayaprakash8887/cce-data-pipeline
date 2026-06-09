@@ -266,7 +266,7 @@ Materialized Views in ClickHouse are triggered on INSERT — they read from the 
 | `step_instances FINAL` | `step_instances` | ReplacingMergeTree | Current state per step; query with FINAL for exact counts |
 | `intelligence_deliveries FINAL` | `intelligence_deliveries` | ReplacingMergeTree | Current state per delivery; query with FINAL for exact counts |
 
-> **Compliance counts are not an MV.** Status breakdowns and step compliance rates come from `protocol_instances FINAL` / `step_instances FINAL` directly (mutable tables — an incremental MV would double-count CDC UPDATEs), or from the optional `rollup_protocol_instance_compliance` (schema/05).
+> **Compliance counts are not a SummingMergeTree/AggregatingMergeTree count MV.** A count MV over the mutable `protocol_instances`/`step_instances` would double-count CDC UPDATEs. Current-state counts come from the **`argMaxState` current-state rollups** (`rollup_protocol_instance_current`, `rollup_step_current` in schema/05 — always fresh, no FINAL) or from the base tables with `FINAL`.
 
 ### 4.3 Entity × Behavior Coverage Matrix
 
@@ -276,7 +276,7 @@ Every meaningful Entity × Behavior combination is pre-aggregated or resolvable 
 |---|---|---|---|---|---|---|
 | **Event Ingestion** | `mv_facility_summary` (uniq) | `mv_event_volume_hourly/daily` | `mv_practitioner_summary` | — | `mv_event_volume_hourly/daily` | `mv_event_volume_hourly/daily` |
 | **Ingestion Quality** | — | — | — | — | — | `mv_ingestion_quality` |
-| **Compliance** | `protocol_instances FINAL` (+`step_instances FINAL`) | via `dict_patient_facility` | n/a | `protocol_instances FINAL` / `schema/05` rollup | — | — |
+| **Compliance** | `rollup_step_current` (argMaxState) | via `dict_patient_facility` | n/a | `rollup_protocol_instance_current` (argMaxState) | — | — |
 | **Deviations** | `mv_deviation_by_patient` | via `dict_patient_facility` | n/a | `mv_deviation_by_protocol` | — | — |
 | **Intelligence Triggers** | `mv_intelligence_by_patient` | via `dict_patient_facility` | n/a | `mv_intelligence_by_protocol` | — | — |
 | **Delivery** | `intelligence_deliveries FINAL` | via `dict_patient_facility` | n/a | `intelligence_deliveries FINAL` | — | — |
@@ -352,8 +352,8 @@ This pipeline uses **no projections**. ClickHouse skips projections whenever a q
 be used by `cce-insights-service`, while each `SELECT *` projection costs a full extra sorted
 copy of the table (prohibitive on `inbound_event_logs`, which stores the large `raw_payload`
 blob). The access patterns a projection would serve are instead covered by the skip indexes
-above (which work under `FINAL`), and per-enrollment compliance rollups by the optional
-refreshable table in `schema/05` (see [Deployment Guide § Step 4](deployment-guide.md#step-4-optional--refreshable-compliance-rollup)).
+above (which work under `FINAL`), and current-state compliance reads by the always-fresh
+`argMaxState` rollups in `schema/05` (see [Deployment Guide § Step 4](deployment-guide.md#step-4--current-state-rollups-recommended)).
 
 > If you later run heavy **non-FINAL** analytical scans under a different profile, projections
 > could help there — but they are intentionally omitted for the current `final=1` access path.
@@ -557,10 +557,9 @@ LIMIT 20;
 ### Compliance Overview
 ```sql
 -- Query protocol_instances FINAL for live status counts. There is intentionally NO
--- compliance-count MV: countIfState(status='X') double-counts rows updated via CDC.
--- For per-enrollment step compliance (completed/total), prefer the optional
--- pre-aggregated rollup `rollup_protocol_instance_compliance` (schema/05) instead of
--- scanning step_instances FINAL on every request — see deployment-guide.md § Step 4.
+-- count MV: countIfState(status='X') double-counts rows updated via CDC.
+-- Faster + always-fresh alternative: the argMaxState rollups (rollup_protocol_instance_current
+-- / rollup_step_current, schema/05) — no FINAL, no scan-and-dedup. See deployment-guide.md § Step 4.
 SELECT
     pi.protocol_canonical,
     count()                                                                AS total,

@@ -7,51 +7,60 @@
   "links": [],
   "panels": [
     {
-      "title": "PeerDB CDC Lag (seconds)",
-      "type": "timeseries",
-      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 0 },
-      "datasource": "Prometheus",
-      "targets": [
-        {
-          "expr": "peerdb_cdc_lag_seconds{flow_name=~\"cce_.*\"}",
-          "legendFormat": "{{flow_name}}"
-        }
-      ],
-      "fieldConfig": {
-        "defaults": { "unit": "s" }
-      }
-    },
-    {
-      "title": "PeerDB Rows Synced/sec",
-      "type": "timeseries",
-      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 0 },
-      "datasource": "Prometheus",
-      "targets": [
-        {
-          "expr": "rate(peerdb_rows_synced_total{flow_name=~\"cce_.*\"}[5m])",
-          "legendFormat": "{{flow_name}}"
-        }
-      ],
-      "fieldConfig": {
-        "defaults": { "unit": "ops" }
-      }
-    },
-    {
-      "title": "PeerDB Mirror Status",
+      "title": "Replication Slot Active",
       "type": "stat",
-      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 8 },
-      "datasource": "Prometheus",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 0 },
+      "datasource": "PostgreSQL",
       "targets": [
         {
-          "expr": "peerdb_flow_status{flow_name=~\"cce_.*\"}",
-          "legendFormat": "{{flow_name}}"
+          "rawSql": "SELECT now() AS time, active::int AS slot_active FROM pg_replication_slots WHERE slot_name = 'cce_analytics_slot'",
+          "format": "time_series"
         }
       ],
       "fieldConfig": {
         "defaults": {
           "mappings": [
-            { "options": { "0": { "text": "ERROR", "color": "red" }, "1": { "text": "RUNNING", "color": "green" }, "2": { "text": "PAUSED", "color": "yellow" } }, "type": "value" }
+            { "options": { "0": { "text": "INACTIVE", "color": "red" }, "1": { "text": "ACTIVE", "color": "green" } }, "type": "value" }
           ]
+        }
+      }
+    },
+    {
+      "title": "Inbound Events / min (ClickHouse)",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 0 },
+      "datasource": "ClickHouse",
+      "targets": [
+        {
+          "rawSql": "SELECT toStartOfMinute(received_at) AS time, count() AS events FROM cce_analytics.inbound_event_logs WHERE received_at >= now() - INTERVAL 1 HOUR GROUP BY time ORDER BY time",
+          "format": "time_series"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": { "unit": "short" }
+      }
+    },
+    {
+      "title": "CDC Freshness (s since last event)",
+      "type": "stat",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 8 },
+      "datasource": "ClickHouse",
+      "targets": [
+        {
+          "rawSql": "SELECT now() AS time, dateDiff('second', max(received_at), now()) AS seconds_since_last_event FROM cce_analytics.inbound_event_logs",
+          "format": "time_series"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "thresholds": {
+            "steps": [
+              { "value": 0, "color": "green" },
+              { "value": 120, "color": "yellow" },
+              { "value": 600, "color": "red" }
+            ]
+          }
         }
       }
     },
@@ -146,19 +155,18 @@
       }
     },
     {
-      "title": "PeerDB Sync Errors",
+      "title": "MergeTree Parts per Table (merge pressure)",
       "type": "timeseries",
       "gridPos": { "h": 6, "w": 24, "x": 0, "y": 28 },
-      "datasource": "Prometheus",
+      "datasource": "ClickHouse",
       "targets": [
         {
-          "expr": "increase(peerdb_sync_errors_total{flow_name=~\"cce_.*\"}[5m])",
-          "legendFormat": "{{flow_name}}",
+          "rawSql": "SELECT now() AS time, table, count() AS active_parts FROM system.parts WHERE database = 'cce_analytics' AND active GROUP BY table ORDER BY active_parts DESC",
           "format": "time_series"
         }
       ],
       "fieldConfig": {
-        "defaults": { "unit": "short", "color": { "mode": "fixed", "fixedColor": "red" } }
+        "defaults": { "unit": "short" }
       }
     }
   ],
