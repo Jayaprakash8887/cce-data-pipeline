@@ -27,7 +27,7 @@ if [[ "$DB_EXISTS" != "1" ]]; then
 fi
 echo "✓ Database 'cce_analytics' exists"
 
-# Expected CDC base tables (created by PeerDB mirror)
+# Expected CDC base tables (pre-created via schema/01, populated by the PeerDB mirror)
 EXPECTED_TABLES=(
     "protocol_instances"
     "step_instances"
@@ -37,8 +37,6 @@ EXPECTED_TABLES=(
     "intelligence_event_logs"
     "action_definitions"
     "protocol_definitions"
-    "receiver_adaptors"
-    "destination_adaptor_mappings"
     "compliance_event_logs"
 )
 
@@ -58,8 +56,6 @@ done
 # MV backing tables (the actual data stores — named without suffix, queryable directly)
 EXPECTED_MV_TABLES=(
     "mv_event_volume_hourly"
-    "mv_compliance_summary"
-    "mv_compliance_by_patient"
     "mv_compliance_processing_quality"
     "mv_deviation_trends"
     "mv_deviation_by_protocol"
@@ -88,8 +84,6 @@ done
 # MV trigger views (fire on INSERT, write to backing tables above)
 EXPECTED_MV_TRIGGERS=(
     "mv_event_volume_hourly_mv"
-    "mv_compliance_summary_mv"
-    "mv_compliance_by_patient_mv"
     "mv_compliance_processing_quality_mv"
     "mv_deviation_trends_mv"
     "mv_deviation_by_protocol_mv"

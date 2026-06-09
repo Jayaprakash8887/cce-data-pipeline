@@ -23,7 +23,7 @@
 ### Pre-deployment Checklist
 - [ ] All secrets provisioned in secret store
 - [ ] PostgreSQL `wal_level = logical` confirmed
-- [ ] PostgreSQL `REPLICA IDENTITY FULL` set on all 11 CDC tables
+- [ ] PostgreSQL `REPLICA IDENTITY FULL` set on all 9 CDC tables
 - [ ] PostgreSQL replication slot created: `cce_analytics_slot`
 - [ ] PostgreSQL publication created: `cce_analytics_pub`
 - [ ] ClickHouse database `cce_analytics` created
@@ -56,10 +56,8 @@ ALTER TABLE intelligence_event_log REPLICA IDENTITY FULL;
 ALTER TABLE intelligence_delivery REPLICA IDENTITY FULL;
 ALTER TABLE action_definition REPLICA IDENTITY FULL;
 ALTER TABLE compliance_event_log REPLICA IDENTITY FULL;
-ALTER TABLE receiver_adaptor REPLICA IDENTITY FULL;
-ALTER TABLE destination_adaptor_mapping REPLICA IDENTITY FULL;
 
--- Create publication for all CDC tables
+-- Create publication for all 9 CDC tables
 CREATE PUBLICATION cce_analytics_pub FOR TABLE
     inbound_event_log,
     protocol_definition,
@@ -69,9 +67,7 @@ CREATE PUBLICATION cce_analytics_pub FOR TABLE
     intelligence_event_log,
     intelligence_delivery,
     action_definition,
-    compliance_event_log,
-    receiver_adaptor,
-    destination_adaptor_mapping;
+    compliance_event_log;
 ```
 
 ### Secrets
@@ -280,7 +276,7 @@ CH_HOST=${CH_HOST:-localhost}
 CH_USER=${CH_USER:-cce_pipeline}
 CH_PASS=${CLICKHOUSE_PASSWORD:-cce_analytics_dev}
 
-# Creates all 11 base tables with ReplacingMergeTree(_peerdb_version, _peerdb_is_deleted)
+# Creates all 9 base tables with ReplacingMergeTree(_peerdb_version, _peerdb_is_deleted)
 # Requires ClickHouse 23.2+ (clean_deleted_rows = 'Always')
 clickhouse-client --host "$CH_HOST" --user "$CH_USER" --password "$CH_PASS" \
   --multiquery < schema/01-create-tables.sql
@@ -350,7 +346,7 @@ clickhouse-client --host "$CH_HOST" --user "$CH_USER" --password "$CH_PASS" \
 | Check | Command | Expected |
 |-------|---------|----------|
 | ClickHouse alive | `curl -s http://localhost:8123/ping` | `Ok.` |
-| Tables exist | `clickhouse-client -q "SELECT count() FROM system.tables WHERE database='cce_analytics'"` | `>= 11` |
+| Tables exist | `clickhouse-client -q "SELECT count() FROM system.tables WHERE database='cce_analytics'"` | `>= 9` |
 | MVs exist | `clickhouse-client -q "SELECT count() FROM system.tables WHERE database='cce_analytics' AND engine LIKE '%View%'"` | `>= 14` |
 | Data flowing | `clickhouse-client -q "SELECT name, total_rows FROM system.tables WHERE database='cce_analytics' AND total_rows > 0"` | Tables with rows |
 | PeerDB stack + mirror | `./scripts/check-connector-health.sh` | `STACK HEALTHY` |

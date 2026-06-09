@@ -53,7 +53,7 @@ else
     FAILURES=$((FAILURES + 1))
 fi
 
-# Check publication tables (all 11)
+# Check publication tables (all 9)
 echo ""
 echo "--- Publication Tables ---"
 EXPECTED_TABLES=(
@@ -65,8 +65,6 @@ EXPECTED_TABLES=(
     "intelligence_delivery"
     "intelligence_event_log"
     "action_definition"
-    "receiver_adaptor"
-    "destination_adaptor_mapping"
     "compliance_event_log"
 )
 

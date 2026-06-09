@@ -17,17 +17,18 @@
 -- Create the CDC mirror
 CREATE MIRROR cce_analytics_mirror
 FROM ccedb_peer TO clickhouse_peer
+-- 9 tables. The JSON-like form is used where columns are excluded from the sync
+-- (large JSONB blobs unused by analytics). receiver_adaptor / destination_adaptor_mapping
+-- are intentionally NOT mirrored (unused; adaptor info is denormalized in intelligence_delivery).
 WITH TABLE MAPPING (
     public.protocol_definition:protocol_definitions,
     public.protocol_instance:protocol_instances,
     public.step_instance:step_instances,
     public.deviation:deviations,
     public.inbound_event_log:inbound_event_logs,
-    public.intelligence_delivery:intelligence_deliveries,
-    public.intelligence_event_log:intelligence_event_logs,
+    { from: public.intelligence_delivery, to: intelligence_deliveries, exclude: [fhir_payload] },
+    { from: public.intelligence_event_log, to: intelligence_event_logs, exclude: [event_payload] },
     public.action_definition:action_definitions,
-    public.receiver_adaptor:receiver_adaptors,
-    public.destination_adaptor_mapping:destination_adaptor_mappings,
     public.compliance_event_log:compliance_event_logs
 )
 WITH (

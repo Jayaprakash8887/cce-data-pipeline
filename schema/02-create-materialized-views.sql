@@ -47,26 +47,11 @@ GROUP BY hour, facility_id, source, event_type, resource_type;
 -- ============================================================
 -- Protocol Compliance
 -- ============================================================
-
--- NOTE: total_enrollments / active_count / completed_count are intentionally excluded.
--- Each PeerDB UPDATE arrives as a new INSERT, so countIfState(status='ACTIVE') would
--- double-count every row that was ever updated. Query protocol_instances FINAL for live
--- status counts.
-CREATE TABLE IF NOT EXISTS mv_compliance_summary (
-    protocol_definition_id UUID,
-    first_enrolled         AggregateFunction(min, DateTime64(6)),
-    last_updated           AggregateFunction(max, DateTime64(6))
-) ENGINE = AggregatingMergeTree()
-ORDER BY (protocol_definition_id);
-
-CREATE MATERIALIZED VIEW IF NOT EXISTS mv_compliance_summary_mv
-TO mv_compliance_summary
-AS SELECT
-    protocol_definition_id,
-    minState(enrolled_at)  AS first_enrolled,
-    maxState(updated_at)   AS last_updated
-FROM protocol_instances
-GROUP BY protocol_definition_id;
+-- NOTE: there is intentionally NO compliance-count MV here. Status counts and step
+-- compliance rates require CURRENT state from the mutable protocol_instances /
+-- step_instances tables, which an incremental MV cannot maintain without double-counting
+-- CDC UPDATE events. Query those tables with FINAL, or use the optional pre-aggregated
+-- rollup_protocol_instance_compliance (schema/05-refreshable-rollups.sql) for the hot path.
 
 -- Daily deviation counts by type
 CREATE TABLE IF NOT EXISTS mv_deviation_trends (
@@ -226,34 +211,6 @@ GROUP BY day, facility_id, resource_type;
 -- ============================================================
 -- Entity × Behavior Cross-Dimensional Views
 -- ============================================================
-
--- Patient-level compliance: earliest enrollment and most recent update per patient/protocol.
--- NOTE: countIfState(status='X') accumulates across every CDC event (INSERT + each UPDATE),
--- so a single row updated ACTIVE→COMPLETED would produce active_count=1 AND completed_count=1.
--- For current status breakdown, query protocol_instances FINAL directly.
--- protocol_canonical is stored as anyState (not in GROUP BY): it is set once at enrollment
--- and never changes, so anyState avoids the risk of AggregatingMergeTree creating separate
--- unmerged rows if the value ever differed across CDC events for the same
--- (patient_id, protocol_definition_id).
-CREATE TABLE IF NOT EXISTS mv_compliance_by_patient (
-    patient_id             String,
-    protocol_definition_id UUID,
-    protocol_canonical     AggregateFunction(any, String),
-    first_enrolled         AggregateFunction(min, DateTime64(6)),
-    last_updated           AggregateFunction(max, DateTime64(6))
-) ENGINE = AggregatingMergeTree()
-ORDER BY (patient_id, protocol_definition_id);
-
-CREATE MATERIALIZED VIEW IF NOT EXISTS mv_compliance_by_patient_mv
-TO mv_compliance_by_patient
-AS SELECT
-    patient_id,
-    protocol_definition_id,
-    anyState(protocol_canonical) AS protocol_canonical,
-    minState(enrolled_at)        AS first_enrolled,
-    maxState(updated_at)         AS last_updated
-FROM protocol_instances
-GROUP BY patient_id, protocol_definition_id;
 
 -- Patient-level deviations (JOIN deviations → protocol_instances for patient_id)
 -- LEFT JOIN with FINAL: protocol_instances is a ReplacingMergeTree; without FINAL,

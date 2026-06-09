@@ -140,7 +140,7 @@ the apps own presentation and query ClickHouse via the `cce_pipeline` user.
 
 **PeerDB** connects directly to PostgreSQL's logical replication stream and loads ClickHouse via a **mandatory** S3/MinIO Avro staging step: `flow-worker` writes each CDC batch as Avro to the bucket, and ClickHouse pulls it in with the `s3()` function (there is no direct-insert path for the ClickHouse destination). All 11 ClickHouse tables are **pre-created** via `schema/01-create-tables.sql` with `ReplacingMergeTree(_peerdb_version, _peerdb_is_deleted)` and `SETTINGS clean_deleted_rows = 'Always'` before the PeerDB mirror is started. PeerDB writes into existing tables and does not recreate them. MATERIALIZED columns for JSON extraction are defined inline in the table DDL. For staging details and the AWS S3 swap, see [Data Flow § 2.3](data-flow.md#23-s3minio-staging).
 
-All 11 CDC tables reside in the shared `ccedb` PostgreSQL database. A single PeerDB mirror replicates all tables. For the full table listing, mirror config, and schema details, see [Data Flow & Schema Design](data-flow.md).
+All 9 CDC tables reside in the shared `ccedb` PostgreSQL database. A single PeerDB mirror replicates all tables (two large JSONB columns are excluded, and the unused `receiver_adaptor`/`destination_adaptor_mapping` tables are not mirrored). For the full table listing, mirror config, and schema details, see [Data Flow & Schema Design](data-flow.md).
 
 **PeerDB metadata columns** (added automatically to all tables):
 - `_peerdb_synced_at` — timestamp of sync to ClickHouse
@@ -152,12 +152,11 @@ All 11 CDC tables reside in the shared `ccedb` PostgreSQL database. A single Pee
 **Key features leveraged:**
 - **ReplacingMergeTree (two-parameter)** — `ReplacingMergeTree(_peerdb_version, _peerdb_is_deleted)` with `clean_deleted_rows = 'Always'`: deduplicates by version, physically removes soft-deleted rows on merge
 - **MATERIALIZED columns** — Extract JSON fields from `raw_payload` at insert time (zero query cost), defined inline in table DDL
-- **Materialized Views** — Real-time pre-aggregation triggered on INSERT (14 MVs on append-only sources); mutable entities queried via `FINAL` on base tables
+- **Materialized Views** — Real-time pre-aggregation triggered on INSERT (12 MVs on append-only sources); mutable entities queried via `FINAL` on base tables
 - **AggregatingMergeTree** — Correct incremental aggregation with `-State`/`-Merge` combinators (event logs, deviations — append-only sources only)
 - **SummingMergeTree** — Simple additive rollups (counts per hour/day)
 - **Dictionaries** — Fast key-value lookups replacing JOINs (3 dictionaries, all using `QUERY...FINAL` sources)
 - **Bloom filter indexes** — 17 secondary indexes for fast point lookups on non-ORDER-BY columns (effective under `FINAL`)
-- **No projections** — projections are skipped under `FINAL` (the serving profile sets `final=1`), so they are intentionally omitted; skip indexes cover point lookups instead
 - **CODEC compression** — LZ4/ZSTD for 10-40x compression on event data
 - **TTL** — 90-day hot retention on 4 high-volume log tables (inbound_event_logs, intelligence_event_logs, intelligence_deliveries, compliance_event_logs)
 - **User profiles** — `analytics` (readonly, `final=1` auto-applied) for `cce-insights-service`; `peerdb_writer` (write access, no FINAL overhead) for PeerDB CDC writes
@@ -223,7 +222,7 @@ flowchart TD
 | **Event Volume** | Events by resource type, facility, source, practitioner | `inbound_event_logs` → `mv_event_volume_hourly/daily` |
 | **Facility Ranking** | Event volume, unique patients, unique practitioners per facility | `inbound_event_logs` → `mv_facility_summary` |
 | **Practitioner Activity** | Events per practitioner, patient coverage, resource types | `inbound_event_logs` → `mv_practitioner_summary` |
-| **Compliance** | Adherence rate, on-track/at-risk/non-compliant counts | `protocol_instances` → `mv_compliance_summary`, `mv_compliance_by_patient` |
+| **Compliance** | Adherence rate, on-track/at-risk/non-compliant counts | `protocol_instances FINAL` + `step_instances FINAL` (or `schema/05` rollup) |
 | **Deviations** | Overdue/missed counts, trends, by protocol/patient | `deviations` → `mv_deviation_trends`, `mv_deviation_by_protocol`, `mv_deviation_by_patient` |
 | **Ingestion Quality** | Acceptance rate, rejection reasons, source quality | `inbound_event_logs` → `mv_ingestion_quality` |
 | **Intelligence & Triggers** | Trigger volume by action type, destination, reason | `intelligence_event_logs` → `mv_intelligence_summary`, `mv_intelligence_by_patient/protocol` |

@@ -223,7 +223,7 @@ CREATE TABLE IF NOT EXISTS intelligence_event_logs
     action_definition_id     UUID,
     trigger_reason           String,
     severity                 String,    -- LOW | MEDIUM | HIGH | CRITICAL
-    event_payload            String,    -- JSONB: complete self-contained event for routing
+    -- event_payload (JSONB routing blob) excluded from the mirror — unused by analytics.
     created_at               DateTime64(6),
 
     _peerdb_version      Int64,
@@ -257,8 +257,8 @@ CREATE TABLE IF NOT EXISTS intelligence_deliveries
     destination                    String,
     adaptor_name                   String,     -- denormalized from receiver_adaptor at dispatch
     endpoint_url                   String,     -- denormalized from receiver_adaptor at dispatch
-    fhir_payload                   String,     -- JSONB: FHIR resource sent to adaptor
-    delivery_result                String,     -- JSONB: {httpStatus, responseBody, attempts[]}
+    -- fhir_payload (JSONB resource sent) excluded from the mirror — unused by analytics.
+    delivery_result                String,     -- JSONB: {httpStatus, responseBody, attempts[]} (kept: feeds MATERIALIZED cols)
     latency_ms                     Int64,
     attempt_count                  Int32,
     created_at                     DateTime64(6),
@@ -281,45 +281,4 @@ ORDER BY (id)
 SETTINGS clean_deleted_rows = 'Always';
 
 
--- External webhook endpoint registrations (FHIR R4 Endpoint resources).
--- Status: ACTIVE | INACTIVE
--- Note: config column contains auth credentials (masked in API responses, stored encrypted).
-CREATE TABLE IF NOT EXISTS receiver_adaptors
-(
-    id          UUID,
-    name        String,
-    definition  String,    -- JSONB: FHIR Endpoint resource (address, connectionType, etc.)
-    status      String,    -- ACTIVE | INACTIVE
-    config      String,    -- JSONB: auth headers, retry config (credentials encrypted at rest)
 
-    created_at  DateTime64(6),
-    updated_at  DateTime64(6),
-
-    _peerdb_version      Int64,
-    _peerdb_is_deleted   UInt8 DEFAULT 0,
-    _peerdb_synced_at    DateTime64(6)
-)
-ENGINE = ReplacingMergeTree(_peerdb_version, _peerdb_is_deleted)
-ORDER BY (id)
-SETTINGS clean_deleted_rows = 'Always';
-
-
--- Maps intelligence destination names to receiver adaptors (1:1).
--- Status: ACTIVE | INACTIVE
-CREATE TABLE IF NOT EXISTS destination_adaptor_mappings
-(
-    id                  UUID,
-    destination         String,
-    receiver_adaptor_id UUID,
-    status              String,    -- ACTIVE | INACTIVE
-
-    created_at          DateTime64(6),
-    updated_at          DateTime64(6),
-
-    _peerdb_version      Int64,
-    _peerdb_is_deleted   UInt8 DEFAULT 0,
-    _peerdb_synced_at    DateTime64(6)
-)
-ENGINE = ReplacingMergeTree(_peerdb_version, _peerdb_is_deleted)
-ORDER BY (id)
-SETTINGS clean_deleted_rows = 'Always';

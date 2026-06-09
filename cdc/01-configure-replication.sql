@@ -37,7 +37,7 @@ BEGIN
     END IF;
 END $$;
 
--- Step 4: Grant SELECT on all 11 CDC source tables
+-- Step 4: Grant SELECT on all 9 CDC source tables
 GRANT USAGE ON SCHEMA public TO cce_cdc_user;
 GRANT SELECT ON TABLE
     protocol_definition,
@@ -48,12 +48,10 @@ GRANT SELECT ON TABLE
     intelligence_delivery,
     intelligence_event_log,
     action_definition,
-    receiver_adaptor,
-    destination_adaptor_mapping,
     compliance_event_log
 TO cce_cdc_user;
 
--- Step 5: REPLICA IDENTITY FULL on all 11 tables
+-- Step 5: REPLICA IDENTITY FULL on all 9 tables
 -- Required by PeerDB so UPDATE/DELETE events include the full old-row image.
 -- Without this, only the primary key is available in the WAL for changed rows.
 ALTER TABLE protocol_definition          REPLICA IDENTITY FULL;
@@ -64,11 +62,9 @@ ALTER TABLE inbound_event_log            REPLICA IDENTITY FULL;
 ALTER TABLE intelligence_delivery        REPLICA IDENTITY FULL;
 ALTER TABLE intelligence_event_log       REPLICA IDENTITY FULL;
 ALTER TABLE action_definition            REPLICA IDENTITY FULL;
-ALTER TABLE receiver_adaptor             REPLICA IDENTITY FULL;
-ALTER TABLE destination_adaptor_mapping  REPLICA IDENTITY FULL;
 ALTER TABLE compliance_event_log         REPLICA IDENTITY FULL;
 
--- Step 6: Create publication for all 11 CDC tables
+-- Step 6: Create publication for all 9 CDC tables
 DROP PUBLICATION IF EXISTS cce_analytics_pub;
 CREATE PUBLICATION cce_analytics_pub FOR TABLE
     protocol_definition,
@@ -79,8 +75,6 @@ CREATE PUBLICATION cce_analytics_pub FOR TABLE
     intelligence_delivery,
     intelligence_event_log,
     action_definition,
-    receiver_adaptor,
-    destination_adaptor_mapping,
     compliance_event_log;
 
 -- Step 7: Confirm replication role

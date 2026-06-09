@@ -17,7 +17,7 @@ CREATE DICTIONARY IF NOT EXISTS dict_protocol_definitions (
 )
 PRIMARY KEY id
 SOURCE(CLICKHOUSE(
-    QUERY 'SELECT id, name, version, url, url AS canonical, status FROM cce_analytics.protocol_definitions FINAL'
+    QUERY 'SELECT id, name, version, url, concat(url, ''|'', version) AS canonical, status FROM cce_analytics.protocol_definitions FINAL'
     DB 'cce_analytics'
 ))
 LIFETIME(MIN 60 MAX 300)

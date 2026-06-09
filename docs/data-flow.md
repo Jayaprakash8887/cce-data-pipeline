@@ -70,10 +70,10 @@ PeerDB reads the PostgreSQL Write-Ahead Log (WAL) via logical replication and lo
 | Compliance Service | `action_definition` | `action_definitions` |
 | Compliance Service | `compliance_event_log` | `compliance_event_logs` |
 | Intelligence Service | `intelligence_delivery` | `intelligence_deliveries` |
-| Intelligence Service | `receiver_adaptor` | `receiver_adaptors` |
-| Intelligence Service | `destination_adaptor_mapping` | `destination_adaptor_mappings` |
 
 > **Note:** All CCE services share a single PostgreSQL database (`ccedb`). `REPLICA IDENTITY FULL` is set on all tables to ensure TOAST'd JSONB columns are fully replicated during UPDATEs.
+>
+> **Not mirrored:** `receiver_adaptor` and `destination_adaptor_mapping` are unused by analytics (adaptor metadata is denormalized into `intelligence_deliveries`). Two large JSONB columns are also excluded from the sync: `intelligence_event_log.event_payload` and `intelligence_delivery.fhir_payload`.
 
 ### 2.2 Deduplication & Delete Handling
 
@@ -121,7 +121,7 @@ Implications:
 | Event logs | `inbound_event_logs`, `compliance_event_logs` | ReplacingMergeTree | Raw event audit trail |
 | Domain entities | `protocol_instances`, `step_instances`, `deviations` | ReplacingMergeTree | Protocol lifecycle |
 | Intelligence | `intelligence_event_logs`, `intelligence_deliveries` | ReplacingMergeTree | Trigger & delivery audit |
-| Reference data | `protocol_definitions`, `action_definitions`, `receiver_adaptors`, `destination_adaptor_mappings` | ReplacingMergeTree | Lookup/dimension tables |
+| Reference data | `protocol_definitions`, `action_definitions` | ReplacingMergeTree | Lookup/dimension tables |
 
 ### 3.2 MATERIALIZED Columns (Field Extraction)
 
@@ -151,13 +151,14 @@ practitioner_display String MATERIALIZED
 |--------|------|-------|
 | `id` | UUID | Primary key |
 | `cloudevents_id` | String | CloudEvents envelope ID |
-| `source` | LowCardinality(String) | Event source system |
-| `correlation_id` | Nullable(String) | Cross-service tracing |
-| `raw_payload` | String CODEC(ZSTD(3)) | Full CloudEvents JSON |
-| `status` | LowCardinality(String) | Processing status |
-| `rejection_reason` | LowCardinality(Nullable(String)) | If rejected |
-| `received_at` | DateTime64(3) | Ingestion timestamp |
-| `updated_at` | DateTime64(3) | Last modification timestamp |
+| `source` | String | Event source system |
+| `correlation_id` | String | Cross-service tracing |
+| `raw_payload` | String | Full CloudEvents JSON |
+| `status` | String | Processing status |
+| `rejection_reason` | String | If rejected |
+| `error_details` | String | Error detail (rejection drill-down) |
+| `received_at` | DateTime64(6) | Ingestion timestamp |
+| `updated_at` | DateTime64(6) | Last modification timestamp |
 | `_peerdb_version` | Int64 | CDC version for ReplacingMergeTree deduplication |
 | `_peerdb_is_deleted` | UInt8 | Soft-delete flag (1 = deleted in PostgreSQL) |
 | `subject` | String (MATERIALIZED) | Patient identifier |
@@ -181,13 +182,14 @@ practitioner_display String MATERIALIZED
 | `patient_id` | String |
 | `protocol_definition_id` | UUID |
 | `protocol_canonical` | String |
-| `status` | LowCardinality(String) |
-| `enrolled_at` | DateTime64(3) |
-| `created_at` | DateTime64(3) |
-| `updated_at` | DateTime64(3) |
-| `_version` | UInt64 |
+| `status` | String |
+| `enrolled_at` | DateTime64(6) |
+| `updated_at` | DateTime64(6) |
+| `expires_at` | Nullable(DateTime64(6)) |
+| `_peerdb_version` | Int64 |
+| `_peerdb_is_deleted` | UInt8 |
 
-**Engine:** `ReplacingMergeTree(_peerdb_version, _peerdb_is_deleted) SETTINGS clean_deleted_rows = 'Always'` | **Order By:** `(id)`
+**Engine:** `ReplacingMergeTree(_peerdb_version, _peerdb_is_deleted) SETTINGS clean_deleted_rows = 'Always'` | **Partition:** `toYYYYMM(enrolled_at)` | **Order By:** `(id)`
 
 #### `step_instances`
 
@@ -195,22 +197,21 @@ practitioner_display String MATERIALIZED
 |--------|------|
 | `id` | UUID |
 | `protocol_instance_id` | UUID |
-| `action_id` | String |
-| `repeat_index` | UInt16 |
-| `state` | LowCardinality(String) |
-| `completion_status` | LowCardinality(Nullable(String)) |
-| `required_behavior` | LowCardinality(Nullable(String)) |
-| `due_date` | Nullable(DateTime64(3)) |
-| `overdue_date` | Nullable(DateTime64(3)) |
-| `missed_date` | Nullable(DateTime64(3)) |
-| `completed_at` | Nullable(DateTime64(3)) |
-| `completed_by_source` | Nullable(String) |
-| `completed_by_event_id` | Nullable(UUID) |
-| `created_at` | DateTime64(3) |
-| `updated_at` | DateTime64(3) |
-| `_version` | UInt64 |
+| `action_id` | UUID |
+| `state` | String |
+| `completion_status` | String (EARLY / ON_TIME / LATE) |
+| `repeat_index` | Int32 |
+| `required_behavior` | String |
+| `due_date` | Nullable(DateTime64(6)) |
+| `overdue_date` | Nullable(DateTime64(6)) |
+| `missed_date` | Nullable(DateTime64(6)) |
+| `created_at` | DateTime64(6) |
+| `updated_at` | DateTime64(6) |
+| `completed_at` | Nullable(DateTime64(6)) |
+| `_peerdb_version` | Int64 |
+| `_peerdb_is_deleted` | UInt8 |
 
-**Engine:** `ReplacingMergeTree(_peerdb_version, _peerdb_is_deleted) SETTINGS clean_deleted_rows = 'Always'` | **Order By:** `(id)`
+**Engine:** `ReplacingMergeTree(_peerdb_version, _peerdb_is_deleted) SETTINGS clean_deleted_rows = 'Always'` | **Partition:** `toYYYYMM(created_at)` | **Order By:** `(id)`
 
 #### `deviations`
 
@@ -253,18 +254,19 @@ Materialized Views in ClickHouse are triggered on INSERT — they read from the 
 | `mv_event_volume_hourly` | `inbound_event_logs` | SummingMergeTree | `event_count` per hour/facility/source/type; daily totals derived via `toDate(hour)` at query time |
 | `mv_facility_summary` | `inbound_event_logs` | AggregatingMergeTree | `uniqState(subject)`, `countState()` per facility/day |
 | `mv_practitioner_summary` | `inbound_event_logs` | AggregatingMergeTree | `uniqState(subject)`, `countState()` per practitioner/day |
-| `mv_compliance_summary` | `protocol_instances` | AggregatingMergeTree | `countIfState(status='COMPLETED')` per protocol/day |
 | `mv_deviation_trends` | `deviations` | SummingMergeTree | `deviation_count` per type/day |
 | `mv_deviation_by_protocol` | `deviations` | SummingMergeTree | `deviation_count` per protocol_instance_id/type |
-| `mv_ingestion_quality` | `inbound_event_logs` | SummingMergeTree | `total_count`, `rejected_count` per source/day |
-| `mv_intelligence_summary` | `intelligence_event_logs` | AggregatingMergeTree | `countState()`, `uniqState(subject)` per action_type/day |
-| `mv_compliance_by_patient` | `protocol_instances` | AggregatingMergeTree | `minState(enrolled_at)`, `maxState(updated_at)` per patient/protocol |
 | `mv_deviation_by_patient` | `deviations` JOIN `protocol_instances` | AggregatingMergeTree | `countState()` per patient/deviation_type/day |
+| `mv_ingestion_quality` | `inbound_event_logs` | SummingMergeTree | `event_count` per source/status/rejection_reason/day |
+| `mv_compliance_processing_quality` | `compliance_event_logs` | SummingMergeTree | `event_count` per source/processing_status/day |
+| `mv_intelligence_summary` | `intelligence_event_logs` | AggregatingMergeTree | `countState()`, `uniqState(subject)` per action_type/day |
 | `mv_intelligence_by_patient` | `intelligence_event_logs` | AggregatingMergeTree | `countState()` per subject/action_type/day |
 | `mv_intelligence_by_protocol` | `intelligence_event_logs` | AggregatingMergeTree | `countState()` per protocol_instance_id/action_type/day |
 | `mv_patient_facility_latest` | `inbound_event_logs` | ReplacingMergeTree(last_seen) | Latest facility per patient (dictionary source) |
-| `step_instances FINAL` | `step_instances` | ReplacingMergeTree(_peerdb_version) | Current state per step; query with FINAL for exact counts |
-| `intelligence_deliveries FINAL` | `intelligence_deliveries` | ReplacingMergeTree(_peerdb_version) | Current state per delivery; query with FINAL for exact counts |
+| `step_instances FINAL` | `step_instances` | ReplacingMergeTree | Current state per step; query with FINAL for exact counts |
+| `intelligence_deliveries FINAL` | `intelligence_deliveries` | ReplacingMergeTree | Current state per delivery; query with FINAL for exact counts |
+
+> **Compliance counts are not an MV.** Status breakdowns and step compliance rates come from `protocol_instances FINAL` / `step_instances FINAL` directly (mutable tables — an incremental MV would double-count CDC UPDATEs), or from the optional `rollup_protocol_instance_compliance` (schema/05).
 
 ### 4.3 Entity × Behavior Coverage Matrix
 
@@ -274,7 +276,7 @@ Every meaningful Entity × Behavior combination is pre-aggregated or resolvable 
 |---|---|---|---|---|---|---|
 | **Event Ingestion** | `mv_facility_summary` (uniq) | `mv_event_volume_hourly/daily` | `mv_practitioner_summary` | — | `mv_event_volume_hourly/daily` | `mv_event_volume_hourly/daily` |
 | **Ingestion Quality** | — | — | — | — | — | `mv_ingestion_quality` |
-| **Compliance** | `mv_compliance_by_patient` | via `dict_patient_facility` | n/a | `mv_compliance_summary` | — | — |
+| **Compliance** | `protocol_instances FINAL` (+`step_instances FINAL`) | via `dict_patient_facility` | n/a | `protocol_instances FINAL` / `schema/05` rollup | — | — |
 | **Deviations** | `mv_deviation_by_patient` | via `dict_patient_facility` | n/a | `mv_deviation_by_protocol` | — | — |
 | **Intelligence Triggers** | `mv_intelligence_by_patient` | via `dict_patient_facility` | n/a | `mv_intelligence_by_protocol` | — | — |
 | **Delivery** | `intelligence_deliveries FINAL` | via `dict_patient_facility` | n/a | `intelligence_deliveries FINAL` | — | — |
@@ -375,14 +377,14 @@ CREATE DICTIONARY dict_protocol_definitions (
 )
 PRIMARY KEY id
 SOURCE(CLICKHOUSE(
-    QUERY 'SELECT id, name, version, url, url AS canonical, status FROM cce_analytics.protocol_definitions FINAL'
+    QUERY 'SELECT id, name, version, url, concat(url, ''|'', version) AS canonical, status FROM cce_analytics.protocol_definitions FINAL'
     DB 'cce_analytics'
 ))
 LIFETIME(MIN 60 MAX 300)
 LAYOUT(HASHED());
 ```
 
-Used with `dictGet()` for efficient protocol name lookups without JOIN.
+Used with `dictGet()` for efficient protocol name lookups without JOIN. `canonical` is `url|version` to match `protocol_instances.protocol_canonical`.
 
 ### `dict_patient_facility`
 
@@ -442,8 +444,6 @@ flowchart TD
         AD["action_definition"]
         PD["protocol_definition"]
         CEL["compliance_event_log"]
-        RA["receiver_adaptor"]
-        DAM["destination_adaptor_mapping"]
     end
 
     subgraph ClickHouse Tables
@@ -456,27 +456,25 @@ flowchart TD
         CH_AD["action_definitions"]
         CH_PD["protocol_definitions"]
         CH_CEL["compliance_event_logs"]
-        CH_RA["receiver_adaptors"]
-        CH_DAM["destination_adaptor_mappings"]
     end
 
     subgraph Materialized Views
         MV1["mv_event_volume_hourly"]
         MV2["mv_facility_summary"]
         MV3["mv_practitioner_summary"]
-        MV4["mv_compliance_summary"]
-        MV5["mv_compliance_by_patient"]
-        MV6["mv_deviation_trends"]
-        MV7["mv_deviation_by_protocol"]
-        MV8["mv_deviation_by_patient"]
-        MV9["mv_ingestion_quality"]
-        MV10["mv_patient_facility_latest"]
-        MV11["mv_intelligence_summary"]
-        MV12["mv_intelligence_by_patient"]
-        MV13["mv_intelligence_by_protocol"]
+        MV4["mv_deviation_trends"]
+        MV5["mv_deviation_by_protocol"]
+        MV6["mv_deviation_by_patient"]
+        MV7["mv_ingestion_quality"]
+        MV8["mv_compliance_processing_quality"]
+        MV9["mv_intelligence_summary"]
+        MV10["mv_intelligence_by_patient"]
+        MV11["mv_intelligence_by_protocol"]
+        MV12["mv_patient_facility_latest"]
     end
 
-    subgraph Direct Queries
+    subgraph Direct Queries (FINAL)
+        BT0["protocol_instances FINAL"]
         BT1["step_instances FINAL"]
         BT2["intelligence_deliveries FINAL"]
     end
@@ -490,22 +488,20 @@ flowchart TD
     AD -->|CDC| CH_AD
     PD -->|CDC| CH_PD
     CEL -->|CDC| CH_CEL
-    RA -->|CDC| CH_RA
-    DAM -->|CDC| CH_DAM
 
     CH_IEL --> MV1
     CH_IEL --> MV2
     CH_IEL --> MV3
-    CH_IEL --> MV9
-    CH_IEL --> MV10
-    CH_PI --> MV4
-    CH_PI --> MV5
+    CH_IEL --> MV7
+    CH_IEL --> MV12
+    CH_DEV --> MV4
+    CH_DEV --> MV5
     CH_DEV --> MV6
-    CH_DEV --> MV7
-    CH_DEV --> MV8
+    CH_CEL --> MV8
+    CH_IEG --> MV9
+    CH_IEG --> MV10
     CH_IEG --> MV11
-    CH_IEG --> MV12
-    CH_IEG --> MV13
+    CH_PI --> BT0
     CH_SI --> BT1
     CH_ID --> BT2
 ```
@@ -560,9 +556,8 @@ LIMIT 20;
 
 ### Compliance Overview
 ```sql
--- Query protocol_instances FINAL for live status counts.
--- mv_compliance_summary only stores first_enrolled / last_updated because
--- countIfState(status='X') double-counts rows that were ever updated via CDC.
+-- Query protocol_instances FINAL for live status counts. There is intentionally NO
+-- compliance-count MV: countIfState(status='X') double-counts rows updated via CDC.
 -- For per-enrollment step compliance (completed/total), prefer the optional
 -- pre-aggregated rollup `rollup_protocol_instance_compliance` (schema/05) instead of
 -- scanning step_instances FINAL on every request — see deployment-guide.md § Step 4.

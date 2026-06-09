@@ -1,12 +1,7 @@
 -- CCE Analytics ClickHouse Schema
 -- Secondary indexes and TTL policies
 -- Run: clickhouse-client --database cce_analytics < schema/03-create-indexes.sql
---
--- NOTE: No projections. Projections are skipped by ClickHouse when FINAL is applied, and the
--- cce_pipeline analytics profile sets final=1 — so projections would never be used by
--- cce-insights-service queries, while costing a full extra sorted copy of each table
--- (prohibitive on inbound_event_logs, which carries the large raw_payload blob). Skip indexes
--- (bloom_filter), by contrast, DO prune granules under FINAL, so point lookups use these instead.
+
 
 USE cce_analytics;
 

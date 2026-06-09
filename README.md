@@ -68,13 +68,13 @@ Once the snapshot completes and MVs exist, point `cce-insights-service` at Click
 
 ## CDC Tables
 
-All data flows via Change Data Capture from committed PostgreSQL records (shared `ccedb` database). **11 tables** captured from 3 services (Collector, Compliance, Intelligence) → ClickHouse `cce_analytics` database.
+All data flows via Change Data Capture from committed PostgreSQL records (shared `ccedb` database). **9 tables** captured from 3 services (Collector, Compliance, Intelligence) → ClickHouse `cce_analytics` database.
 
 For full table listing and schema details, see [Data Flow & Schema Design](docs/data-flow.md).
 
 ## Materialized Views
 
-**14 pre-aggregated views** computed at insert time, covering event volume, compliance, deviations, intelligence, and processing quality — with full Entity × Behavior cross-dimensional coverage (patient, facility, practitioner, protocol dimensions). Step and delivery current-state queries run directly against `step_instances FINAL` and `intelligence_deliveries FINAL` (base tables with `ReplacingMergeTree`).
+**12 pre-aggregated views** computed at insert time, covering event volume, deviations, intelligence, and processing quality — across patient, facility, practitioner, and protocol dimensions. Compliance/step/delivery **current-state** queries run directly against `protocol_instances FINAL`, `step_instances FINAL`, and `intelligence_deliveries FINAL` (mutable tables can't be safely pre-counted via MVs); the optional `schema/05` refreshable rollup accelerates the hot compliance path.
 
 For the complete MV catalog and coverage matrix, see [Data Flow & Schema Design § 4](docs/data-flow.md).
 

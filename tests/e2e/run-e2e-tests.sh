@@ -60,17 +60,17 @@ echo ""
 echo "--- 2. Schema Validation ---"
 
 TABLE_COUNT=$(ch_query "SELECT count() FROM system.tables WHERE database = '${CH_DB}' AND engine NOT IN ('MaterializedView')" | tr -d '[:space:]')
-if [[ "$TABLE_COUNT" -ge 11 ]]; then
-    log_pass "ClickHouse has ${TABLE_COUNT} tables (expected >= 11)"
+if [[ "$TABLE_COUNT" -ge 9 ]]; then
+    log_pass "ClickHouse has ${TABLE_COUNT} tables (expected >= 9)"
 else
-    log_fail "ClickHouse has ${TABLE_COUNT} tables (expected >= 11)"
+    log_fail "ClickHouse has ${TABLE_COUNT} tables (expected >= 9)"
 fi
 
 MV_COUNT=$(ch_query "SELECT count() FROM system.tables WHERE database = '${CH_DB}' AND engine = 'MaterializedView'" | tr -d '[:space:]')
-if [[ "$MV_COUNT" -ge 14 ]]; then
-    log_pass "ClickHouse has ${MV_COUNT} materialized-view triggers (expected >= 14)"
+if [[ "$MV_COUNT" -ge 12 ]]; then
+    log_pass "ClickHouse has ${MV_COUNT} materialized-view triggers (expected >= 12)"
 else
-    log_fail "ClickHouse has ${MV_COUNT} materialized-view triggers (expected >= 14)"
+    log_fail "ClickHouse has ${MV_COUNT} materialized-view triggers (expected >= 12)"
 fi
 
 DICT_COUNT=$(ch_query "SELECT count() FROM system.dictionaries WHERE database = '${CH_DB}'" | tr -d '[:space:]')
