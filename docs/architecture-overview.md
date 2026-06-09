@@ -12,10 +12,13 @@ graph TB
         PG["PostgreSQL 16<br/>(ccedb)"]
     end
 
-    subgraph Pipeline["CCE Data Pipeline"]
+    subgraph Pipeline["CCE Data Pipeline (this repo)"]
         PEERDB["PeerDB<br/>(WAL Replication)"]
         CLICKHOUSE["ClickHouse<br/>(OLAP Analytics Store)"]
-        SUPERSET["Apache Superset<br/>(Dashboards & Visualization)"]
+    end
+
+    subgraph Presentation["Presentation (separate repos)"]
+        INSIGHTS["cce-insights-service<br/>+ cce-insights-ui"]
     end
 
     subgraph Users
@@ -31,22 +34,24 @@ graph TB
 
     PG -->|"CDC (WAL)"| PEERDB
     PEERDB -->|"Direct WAL replication"| CLICKHOUSE
-    CLICKHOUSE --> SUPERSET
+    CLICKHOUSE -->|"SQL (HTTP/native)"| INSIGHTS
 
-    SUPERSET --> OPS
-    SUPERSET --> CLINICAL
-    SUPERSET --> ADMIN
+    INSIGHTS --> OPS
+    INSIGHTS --> CLINICAL
+    INSIGHTS --> ADMIN
 
     classDef existing fill:#7B8D8E,stroke:#566573,color:white
     classDef pipeline fill:#4A90D9,stroke:#2C5F8A,color:white
+    classDef presentation fill:#9B59B6,stroke:#8E44AD,color:white
     classDef users fill:#27AE60,stroke:#1E8449,color:white
 
     class COLLECTOR,COMPLIANCE,SCHEDULER,INTELLIGENCE,PG existing
-    class PEERDB,CLICKHOUSE,SUPERSET pipeline
+    class PEERDB,CLICKHOUSE pipeline
+    class INSIGHTS presentation
     class OPS,CLINICAL,ADMIN users
 ```
 
-**This pipeline does NOT handle:** event ingestion, protocol matching, step completion, deviation detection, intelligence routing, or any write operations to CCE operational databases.
+**This pipeline does NOT handle:** event ingestion, protocol matching, step completion, deviation detection, intelligence routing, dashboards/UI, or any write operations to CCE operational databases. The presentation layer (`cce-insights-service` / `cce-insights-ui`) is a separate deployment that reads ClickHouse.
 
 ---
 
@@ -59,7 +64,7 @@ graph TB
 | 3 | **No custom stream processing** | ClickHouse MATERIALIZED columns + Materialized Views replace Flink — fewer moving parts, less operational burden |
 | 4 | **Schema-on-read flexibility** | ClickHouse's JSON functions handle evolving FHIR payloads without migrations; `raw_payload` preserved for future extraction |
 | 5 | **Immutable append-only** | All analytics data captured via CDC; ReplacingMergeTree handles updates idempotently |
-| 6 | **Self-service analytics** | Operations teams build their own dashboards; no engineering dependency |
+| 6 | **Separation of pipeline & presentation** | This repo owns CDC → ClickHouse; `cce-insights-service`/`ui` own dashboards and query ClickHouse independently |
 | 7 | **Graceful degradation** | Pipeline failures do not impact CCE operational services |
 
 ---
@@ -70,25 +75,23 @@ graph TB
 
 | Layer | Technology | Version | License | Purpose |
 |-------|-----------|---------|---------|---------|
-| Change Data Capture | PeerDB | 0.18+ | Apache 2.0 | Direct WAL replication from PostgreSQL to ClickHouse |
-| Analytics Database | ClickHouse | 24.8 LTS | Apache 2.0 | Columnar OLAP with MATERIALIZED columns + MVs |
-| Visualization | Apache Superset | 4.0.2 | Apache 2.0 | Interactive dashboards & scheduled reports |
+| Change Data Capture | PeerDB | stable-v0.36.26 | Apache 2.0 | Direct WAL replication from PostgreSQL to ClickHouse (full OSS stack in docker-compose.yml) |
+| Analytics Database | ClickHouse | 24.8 LTS | Apache 2.0 | Columnar OLAP with MATERIALIZED columns + MVs; serving layer for insights-service |
 | Operational Monitoring | Grafana | 11.x | AGPL 3.0 | Infrastructure & pipeline health monitoring |
 | Metrics | Prometheus | 2.53 | Apache 2.0 | Metrics collection from services |
-| Caching | Redis | 7.x | BSD | Superset result caching |
 
-> **No stream processing layer.** ClickHouse MATERIALIZED columns handle field extraction at insert time. Materialized Views pre-aggregate. Zero custom application code.
+> **No stream processing layer.** ClickHouse MATERIALIZED columns handle field extraction at insert time. Materialized Views pre-aggregate. Zero custom application code in the pipeline.
+>
+> **Presentation is out of scope for this repo.** Dashboards and UI are served by `cce-insights-service` / `cce-insights-ui` (separate repos) querying ClickHouse directly.
 
 ### 3.2 Version Compatibility Matrix
 
 | Component | Minimum Version | Tested Version | Notes |
 |-----------|----------------|----------------|-------|
-| PeerDB | 0.18 | latest | OSS self-hosted |
+| PeerDB | stable-v0.36.26 | stable-v0.36.26 | OSS self-hosted; pinned in docker-compose.yml + infra/peerdb/ |
 | ClickHouse | 23.2 | 24.8 LTS | 23.2+ required for `clean_deleted_rows = 'Always'` |
-| Apache Superset | 3.0 | 4.0.2 | With ClickHouse driver |
 | Grafana | 10.0 | 11.2 | With ClickHouse plugin |
 | PostgreSQL (source) | 14 | 16 | Existing CCE database (`ccedb`) |
-| Redis | 6.0 | 7.x | Superset cache |
 | Prometheus | 2.45 | 2.53 | Metrics collection |
 
 ### 3.3 Technology Decisions
@@ -103,14 +106,14 @@ graph TB
 | Apache Pinot | More complex; limited community adoption |
 | **ClickHouse** | ✅ Simple deployment; fastest analytical queries; excellent compression; SQL-compatible; MATERIALIZED columns; MVs with -State/-Merge combinators |
 
-#### Why Superset?
+#### Why a separate presentation layer (cce-insights-service / cce-insights-ui)?
 
-| Alternative | Why Not |
-|-------------|---------|
-| Grafana | Primarily operational/metrics; limited BI features |
-| Metabase | Simpler but less powerful; limited SQL Lab; no row-level security |
-| Custom React app | Defeats purpose of open-source stack |
-| **Apache Superset** | ✅ Full BI platform; SQL Lab; RBAC; scheduled reports; ClickHouse native connector; embeddable |
+The existing CCE insights apps deliver bespoke clinical views — patient-detail pages,
+service-workflow compliance timelines, source-comparison, pipeline-loss detection — that
+are hand-built React components with no faithful equivalent in a generic BI tool (Superset,
+Metabase, Grafana). Rather than approximate them, the insights apps are repointed at
+ClickHouse as their data source. This repo owns only the pipeline (CDC → ClickHouse);
+the apps own presentation and query ClickHouse via the `cce_pipeline` user.
 
 #### Why PeerDB (not Debezium + Kafka or ClickHouse MaterializedPostgreSQL)?
 
@@ -154,20 +157,22 @@ All 11 CDC tables reside in the shared `ccedb` PostgreSQL database. A single Pee
 - **Bloom filter indexes** — 15 secondary indexes for fast point lookups on non-ORDER-BY columns
 - **CODEC compression** — LZ4/ZSTD for 10-40x compression on event data
 - **TTL** — 90-day hot retention on 4 high-volume log tables (inbound_event_logs, intelligence_event_logs, intelligence_deliveries, compliance_event_logs)
-- **User profiles** — `analytics` (readonly, `final=1` auto-applied) for Superset; `peerdb_writer` (write access, no FINAL overhead) for PeerDB CDC writes
+- **User profiles** — `analytics` (readonly, `final=1` auto-applied) for `cce-insights-service`; `peerdb_writer` (write access, no FINAL overhead) for PeerDB CDC writes
 
 For full schema DDL, MV catalog, Entity × Behavior coverage matrix, and query patterns, see [Data Flow & Schema Design](data-flow.md).
 
-### 4.3 Visualization Layer (Superset)
+### 4.3 Presentation Layer (external — cce-insights-service / cce-insights-ui)
 
-- **ClickHouse connector** — native SQLAlchemy driver (`clickhouse-connect`)
-- **Row-level security** — facility-based access control
-- **Alerts & reports** — scheduled email/Slack delivery
-- **SQL Lab** — ad-hoc exploration for power users
-- **Dashboard templates** — importable JSON dashboards
-- **Authentication:** OAuth2/OIDC with existing Keycloak instance
+Dashboards and UI are **not** part of this repo. The `cce-insights-service` backend queries
+ClickHouse (HTTP 8123 or native 9000, user `cce_pipeline`) and `cce-insights-ui` renders the
+clinical views. Responsibilities that live in those apps:
 
-For dashboard wireframes and SQL queries, see [Dashboard Design](dashboard-design.md).
+- **ClickHouse access** — via the `cce_pipeline` read-only user (`final=1` applied automatically)
+- **AuthN/AuthZ** — handled by the insights apps (e.g. Keycloak), not by this pipeline
+- **Facility/role scoping** — enforced in the service layer
+- **Bespoke clinical views** — patient detail, workflow timelines, source comparison, etc.
+
+Per-domain ClickHouse SQL the service can reuse is in [Query Reference](query-reference/).
 
 ### 4.4 Operational Monitoring (Grafana + Prometheus)
 
@@ -177,7 +182,9 @@ For dashboard wireframes and SQL queries, see [Dashboard Design](dashboard-desig
 - End-to-end latency (PostgreSQL commit → ClickHouse insert)
 - PostgreSQL WAL replication slot lag
 
-**Prometheus** scrapes metrics from PeerDB (port 2112) and ClickHouse (port 9363).
+**Prometheus** scrapes metrics from ClickHouse (port 9363). PeerDB (stable-v0.36.26) exports
+telemetry via OpenTelemetry rather than a built-in Prometheus endpoint — wire an OTel collector
+to scrape it (the `peerdb` scrape job in `infra/prometheus/prometheus.yml` is left disabled).
 
 ---
 
@@ -188,19 +195,16 @@ flowchart TD
     PG["PostgreSQL (existing)"] -->|"Logical replication (WAL)"| PEERDB["PeerDB"]
     PEERDB -->|"Direct insert"| CLICKHOUSE["ClickHouse"]
 
-    CLICKHOUSE --> SUPERSET["Apache Superset"]
+    CLICKHOUSE -->|"SQL"| INSIGHTS["cce-insights-service / ui (external)"]
     CLICKHOUSE --> GRAFANA["Grafana"]
 
-    KEYCLOAK["Keycloak (existing)"] --> SUPERSET
     PROMETHEUS["Prometheus"] --> GRAFANA
-    PEERDB -.->|"metrics"| PROMETHEUS
     CLICKHOUSE -.->|"metrics"| PROMETHEUS
 
     style PG fill:#27AE60,stroke:#1E8449,color:white
-    style KEYCLOAK fill:#27AE60,stroke:#1E8449,color:white
     style PEERDB fill:#4A90D9,stroke:#2C5F8A,color:white
     style CLICKHOUSE fill:#4A90D9,stroke:#2C5F8A,color:white
-    style SUPERSET fill:#9B59B6,stroke:#8E44AD,color:white
+    style INSIGHTS fill:#9B59B6,stroke:#8E44AD,color:white
     style GRAFANA fill:#9B59B6,stroke:#8E44AD,color:white
     style PROMETHEUS fill:#7B8D8E,stroke:#566573,color:white
 ```
@@ -255,27 +259,28 @@ flowchart TD
 
 | Component | Containers | CPU | RAM | Storage |
 |-----------|-----------|-----|-----|---------|
-| PeerDB | 1 | 0.5 core | 512 MB | — |
+| PeerDB (full stack: catalog, temporal, flow-api, 2 workers, nexus, ui) | 8 | 2 cores | 3 GB | 5 GB |
+| MinIO | 1 | 0.5 core | 512 MB | 20 GB |
 | ClickHouse | 1 | 4 cores | 16 GB | 100 GB SSD |
-| Superset (web + worker) | 1 | 2 cores | 4 GB | — |
-| Redis (Superset cache) | 1 | 0.5 core | 1 GB | — |
 | Prometheus | 1 | 0.5 core | 1 GB | 10 GB |
 | Grafana | 1 | 0.5 core | 512 MB | — |
-| **Total** | **6** | **8 cores** | **23 GB** | **110 GB** |
+| **Total** | **12** | **~7 cores** | **21 GB** | **135 GB** |
+
+> Presentation (`cce-insights-service` / `cce-insights-ui`) is sized and deployed separately.
 
 #### Production (600k events/day)
 
 | Component | Containers | CPU | RAM | Storage |
 |-----------|-----------|-----|-----|---------|
-| PeerDB | 1 | 1 core | 1 GB | — |
+| PeerDB (full stack) | 8 | 3 cores | 6 GB | 20 GB |
+| MinIO | 1 | 1 core | 1 GB | 100 GB |
 | ClickHouse | 1 | 8 cores | 32 GB | 500 GB SSD |
-| Superset (web) | 2 (HA) | 4 cores | 8 GB | — |
-| Superset (worker) | 2 | 2 cores | 4 GB | — |
-| Redis (Superset) | 1 | 1 core | 2 GB | — |
 | Prometheus | 1 | 2 cores | 4 GB | 50 GB |
 | Grafana | 1 | 1 core | 1 GB | — |
-| **Total** | **9** | **19 cores** | **52 GB** | **550 GB** |
+| **Total** | **12** | **~15 cores** | **44 GB** | **670 GB** |
 
+> Presentation (`cce-insights-service` / `cce-insights-ui`) is sized and deployed separately.
+>
 > **Scale-out path:** ClickHouse supports sharding + replication for horizontal scaling. At 600k events/day, a single node is more than sufficient. Scale to a cluster when daily volume exceeds 10M events.
 
 ---
@@ -285,11 +290,11 @@ flowchart TD
 | Concern | Mechanism |
 |---------|-----------|
 | **Network isolation** | Data pipeline in dedicated network segment; PeerDB access via internal network only |
-| **Authentication** | Superset: OAuth2/OIDC (Keycloak); ClickHouse: native user/password; PeerDB: password-protected catalog |
-| **Authorization** | Superset RBAC: roles mapped to facility/program access; Row-level security for multi-tenant |
-| **Data in transit** | TLS for all inter-component communication (ClickHouse TLS, HTTPS for Superset, PeerDB TLS) |
+| **Authentication** | ClickHouse: native user/password (`cce_pipeline` read-only); PeerDB nexus: `PEERDB_PASSWORD`; end-user auth handled by `cce-insights-service` (e.g. Keycloak) |
+| **Authorization** | ClickHouse readonly profile for the serving user; facility/program/role scoping enforced in `cce-insights-service` |
+| **Data in transit** | TLS for all inter-component communication (ClickHouse TLS, PeerDB TLS) |
 | **Data at rest** | ClickHouse disk encryption; sensitive fields accessible only to authorized roles |
-| **Audit** | Superset audit log; ClickHouse query log; PeerDB mirror status and sync history |
+| **Audit** | ClickHouse query log; PeerDB mirror status and sync history |
 | **PII handling** | Patient UPIDs are pseudonymized identifiers (not names); FHIR resources stored for operational analytics only |
 
 ---
@@ -298,9 +303,9 @@ flowchart TD
 
 | Failure | Impact | Recovery |
 |---------|--------|----------|
-| ClickHouse down | Dashboards unavailable; PeerDB buffers pending rows | PeerDB retries on recovery; WAL retained by replication slot |
+| ClickHouse down | insights-service queries fail; PeerDB buffers pending rows | PeerDB retries on recovery; WAL retained by replication slot |
 | PeerDB failure | CDC tables go stale; WAL grows on PostgreSQL | PeerDB auto-resumes from replication slot; `max_slot_wal_keep_size=10GB` prevents unbounded growth |
-| Superset down | Dashboards unavailable | No data impact; restart and reconnect |
+| insights-service/ui down | Dashboards unavailable (external app) | No pipeline/data impact; handled in that deployment |
 | PostgreSQL replication slot dropped | Full re-snapshot required | Recreate mirror via `connectors/peerdb-mirror.sql`; PeerDB performs parallelized initial load |
 
 **Key invariant:** The data pipeline is a **read-only observer**. Its failure never impacts CCE operational services.
@@ -310,14 +315,12 @@ flowchart TD
 | Component | Strategy | RPO | RTO |
 |-----------|----------|-----|-----|
 | ClickHouse | Daily backup to object storage (`clickhouse-backup`) | 24 hours | 1 hour |
-| Superset (metadata DB) | PostgreSQL backup (dashboards, users, permissions) | 24 hours | 30 min |
-| PeerDB | Catalog backed up with PostgreSQL; WAL slot preserves replay position | 0 (resume from slot) | 5 min |
+| PeerDB | Catalog DB (`pgdata`) backed up; WAL slot preserves replay position | 0 (resume from slot) | 5 min |
 
 ### Upgrades
 
 - **ClickHouse:** Rolling restart for minor versions; backup before major versions
-- **PeerDB:** Restart; mirror resumes from replication slot position automatically
-- **Superset:** Blue-green deployment (stateless; metadata in PostgreSQL)
+- **PeerDB:** Bump image tags (all `:stable-vX`) and re-sync `infra/peerdb/`; mirror resumes from the replication slot automatically
 
 ---
 
@@ -327,9 +330,9 @@ flowchart TD
 |-------|----------|------------|
 | **Phase 1: Foundation** | 2 weeks | Deploy ClickHouse, PeerDB, create mirror, CDC tables |
 | **Phase 2: Materialized Views** | 1 week | Configure MVs for all analytics domains |
-| **Phase 3: Dashboards** | 2 weeks | Configure Superset, build core dashboards |
-| **Phase 4: Validation** | 1 week | Run parallel with existing insights-service; validate data accuracy |
-| **Phase 5: Cutover** | 1 week | Route users to Superset; decommission insights-service and insights-ui |
+| **Phase 3: Insights repoint** | 2 weeks | Repoint `cce-insights-service` queries from the old backend to ClickHouse |
+| **Phase 4: Validation** | 1 week | Run parallel with the existing backend; validate data accuracy |
+| **Phase 5: Cutover** | 1 week | Switch `cce-insights-service` fully to ClickHouse; decommission the old insights backend |
 
 **Total estimated timeline:** 7 weeks
 
@@ -342,7 +345,7 @@ The pipeline is designed for forward-compatible evolution without downtime:
 | Change | Impact | Action Required |
 |--------|--------|-----------------|
 | New FHIR field needed in analytics | None (raw_payload preserved) | `ALTER TABLE ADD COLUMN ... MATERIALIZED` on `inbound_event_logs` |
-| New FHIR resource type | Auto-captured (LowCardinality String) | Update dashboard filters |
+| New FHIR resource type | Auto-captured (LowCardinality String) | Update `cce-insights-service` filters |
 | PostgreSQL table gains a column | PeerDB auto-captures via replication messages | `ALTER TABLE ADD COLUMN` on ClickHouse side |
 | PostgreSQL table dropped/renamed | PeerDB mirror errors on missing table | Update mirror `TABLE MAPPING` in `connectors/peerdb-mirror.sql` |
 | New PostgreSQL table needed | Add CDC capture | Add table to mirror mapping + create ClickHouse table + optional MV |

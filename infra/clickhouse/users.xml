@@ -1,7 +1,7 @@
 <clickhouse>
     <profiles>
-        <!-- Analytics profile: FINAL applied automatically so ad-hoc Superset SQL Lab
-             queries get correct deduplication without needing explicit FINAL clauses. -->
+        <!-- Analytics profile: FINAL applied automatically so reads from cce-insights-service
+             (and ad-hoc queries) get correct deduplication without explicit FINAL clauses. -->
         <analytics>
             <final>1</final>
             <max_memory_usage>10000000000</max_memory_usage>
@@ -18,7 +18,7 @@
     </profiles>
 
     <users>
-        <!-- Superset / analysts: read-only with automatic FINAL -->
+        <!-- cce-insights-service / analysts: read-only with automatic FINAL -->
         <cce_pipeline>
             <password_sha256_hex/>
             <networks>

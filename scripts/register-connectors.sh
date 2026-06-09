@@ -1,92 +1,61 @@
 #!/usr/bin/env bash
-# Create the PeerDB CDC mirror for the CCE analytics pipeline
-# Usage: ./scripts/register-connectors.sh [peerdb-url]
+# Create the PeerDB CDC mirror for the CCE analytics pipeline.
 #
-# Prerequisites:
-#   1. PeerDB peers configured: 'ccedb_peer' (PostgreSQL) and 'clickhouse_peer' (ClickHouse)
-#      via the PeerDB UI at http://<peerdb-host>:3000 or peerdb CLI
-#   2. PostgreSQL configured for logical replication (cdc/01-configure-replication.sql)
-#   3. ClickHouse database 'cce_analytics' created
+# Uses the PeerDB nexus SQL interface (port 9900) and applies the CREATE MIRROR
+# statement from connectors/peerdb-mirror.sql.
+#
+# Prerequisites (run in this order):
+#   1. ClickHouse tables pre-created:   clickhouse-client ... < schema/01-create-tables.sql
+#   2. PostgreSQL logical replication:  psql ... -f cdc/01-configure-replication.sql
+#   3. PeerDB peers created:            ./scripts/create-peers.sh
+#      (creates 'ccedb_peer' and 'clickhouse_peer')
+#
+# The ClickHouse database 'cce_analytics' is created automatically by the
+# CLICKHOUSE_DB env var in docker-compose.yml (dev) or manually in production.
+#
+# Usage: ./scripts/register-connectors.sh
 
 set -euo pipefail
 
-PEERDB_URL="${1:-http://localhost:8085}"
+PEERDB_HOST="${PEERDB_HOST:-localhost}"
+PEERDB_PORT="${PEERDB_PORT:-9900}"
+PEERDB_USER="${PEERDB_USER:-peerdb}"
+PEERDB_PASSWORD="${PEERDB_PASSWORD:-peerdb}"
 
-echo "=== Creating PeerDB CDC Mirror ==="
-echo "PeerDB API: ${PEERDB_URL}"
+MIRROR_SQL="connectors/peerdb-mirror.sql"
+
+echo "=== Creating PeerDB CDC Mirror (via nexus SQL @ ${PEERDB_HOST}:${PEERDB_PORT}) ==="
+echo "Applying ${MIRROR_SQL}..."
 echo ""
 
-# Wait for PeerDB to be ready
-echo "Waiting for PeerDB..."
-for i in $(seq 1 30); do
-    if curl -sf "${PEERDB_URL}/health" > /dev/null 2>&1; then
-        echo "✓ PeerDB is ready"
-        break
-    fi
-    if [[ $i -eq 30 ]]; then
-        echo "✗ PeerDB not ready after 30 attempts"
-        exit 1
-    fi
-    sleep 2
-done
+if [[ ! -f "$MIRROR_SQL" ]]; then
+    echo "✗ ${MIRROR_SQL} not found — run from the repo root."
+    exit 1
+fi
 
-echo ""
+OUT=$(PGPASSWORD="$PEERDB_PASSWORD" psql \
+        "host=${PEERDB_HOST} port=${PEERDB_PORT} user=${PEERDB_USER} dbname=peerdb" \
+        -v ON_ERROR_STOP=1 -f "$MIRROR_SQL" 2>&1) && RC=0 || RC=$?
 
-# Create mirror via PeerDB API
-echo "Creating mirror cce_analytics_mirror..."
-HTTP_CODE=$(curl -s -o /tmp/peerdb_create_response.json -w "%{http_code}" \
-    -X POST "${PEERDB_URL}/v1/mirrors/cdc" \
-    -H "Content-Type: application/json" \
-    -d @- <<'EOF'
-{
-  "flow_job_name": "cce_analytics_mirror",
-  "connection_configs": {
-    "source": { "name": "ccedb_peer" },
-    "destination": { "name": "clickhouse_peer" },
-    "destination_table_identifier": "cce_analytics"
-  },
-  "table_mappings": [
-    { "source_table_identifier": "public.protocol_definition",         "destination_table_identifier": "protocol_definitions" },
-    { "source_table_identifier": "public.protocol_instance",           "destination_table_identifier": "protocol_instances" },
-    { "source_table_identifier": "public.step_instance",               "destination_table_identifier": "step_instances" },
-    { "source_table_identifier": "public.deviation",                   "destination_table_identifier": "deviations" },
-    { "source_table_identifier": "public.inbound_event_log",           "destination_table_identifier": "inbound_event_logs" },
-    { "source_table_identifier": "public.intelligence_delivery",       "destination_table_identifier": "intelligence_deliveries" },
-    { "source_table_identifier": "public.intelligence_event_log",      "destination_table_identifier": "intelligence_event_logs" },
-    { "source_table_identifier": "public.action_definition",           "destination_table_identifier": "action_definitions" },
-    { "source_table_identifier": "public.receiver_adaptor",            "destination_table_identifier": "receiver_adaptors" },
-    { "source_table_identifier": "public.destination_adaptor_mapping", "destination_table_identifier": "destination_adaptor_mappings" },
-    { "source_table_identifier": "public.compliance_event_log",        "destination_table_identifier": "compliance_event_logs" }
-  ],
-  "do_initial_snapshot": true,
-  "snapshot_num_rows_per_partition": 500000,
-  "snapshot_num_tables_in_parallel": 4,
-  "snapshot_max_parallel_workers": 8,
-  "cdc_sync_interval_seconds": 10,
-  "soft_delete": true,
-  "publication_name": "cce_analytics_pub",
-  "replication_slot_name": "cce_analytics_slot"
-}
-EOF
-)
+echo "$OUT" | sed 's/^/  /'
 
-if [[ "$HTTP_CODE" == "200" || "$HTTP_CODE" == "201" ]]; then
-    echo "✓ Mirror cce_analytics_mirror created (HTTP ${HTTP_CODE})"
-elif [[ "$HTTP_CODE" == "409" ]]; then
-    echo "  Mirror already exists (HTTP 409) — skipping creation"
+if [[ $RC -eq 0 ]]; then
+    echo ""
+    echo "✓ Mirror cce_analytics_mirror created — initial snapshot starting"
+elif echo "$OUT" | grep -qi "already exists"; then
+    echo ""
+    echo "  Mirror already exists — skipping creation"
 else
-    echo "✗ Failed to create mirror (HTTP ${HTTP_CODE})"
-    cat /tmp/peerdb_create_response.json 2>/dev/null
+    echo ""
+    echo "✗ Failed to create mirror (exit ${RC})"
     exit 1
 fi
 
 echo ""
-echo "--- Mirror Status ---"
-STATUS_JSON=$(curl -sf "${PEERDB_URL}/v1/mirrors/cce_analytics_mirror" 2>/dev/null || echo '{}')
-STATUS=$(echo "$STATUS_JSON" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('status', 'UNKNOWN'))" 2>/dev/null || echo "UNKNOWN")
-echo "  cce_analytics_mirror: ${STATUS}"
-
-echo ""
 echo "=== Mirror Creation Complete ==="
-echo "Monitor snapshot progress in the PeerDB UI: ${PEERDB_URL/8085/3000}"
-echo "Run schema/01-create-tables.sql AFTER initial snapshot completes."
+echo "Monitor:  ./scripts/check-connector-health.sh"
+echo "          PeerDB UI  http://localhost:3000   |   Temporal UI  http://localhost:8085"
+echo "After the initial snapshot completes, create MVs/indexes/dictionaries:"
+echo "  clickhouse-client --database cce_analytics --multiquery < schema/02-create-materialized-views.sql"
+echo "  clickhouse-client --database cce_analytics --multiquery < schema/03-create-indexes-projections.sql"
+echo "  clickhouse-client --database cce_analytics --multiquery < schema/04-create-dictionary.sql"

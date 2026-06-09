@@ -1,5 +1,47 @@
-# CCE Data Pipeline — Docker Compose (Local Development)
+# CCE Data Pipeline — Docker Compose (Local Development / single-host)
 # Usage: docker compose up -d
+#
+# This file runs the data pipeline: ClickHouse (analytics serving layer) + the full PeerDB
+# OSS CDC stack (pinned stable-v0.36.26: catalog, temporal(+ui+admin-tools), flow-api,
+# flow-snapshot-worker, flow-worker, peerdb nexus, peerdb-ui, minio) + Prometheus/Grafana
+# for pipeline monitoring.
+#
+# Presentation (dashboards/UI) is NOT here — cce-insights-service + cce-insights-ui query
+# ClickHouse directly (see the "Presentation layer" note below).
+#
+# The PeerDB services and their support files are vendored under infra/peerdb/
+# from github.com/PeerDB-io/peerdb at tag stable-v0.36.26. Bump the image tags and
+# re-sync infra/peerdb/ together when upgrading.
+#
+# Port map (host):
+#   8123 ClickHouse HTTP   9000 ClickHouse native   9363 ClickHouse metrics
+#   3001 Grafana           9090 Prometheus
+#   9900 PeerDB nexus SQL  3000 PeerDB UI           8085 Temporal UI
+#   8112 flow-api gRPC     8113 flow-api HTTP        7233 Temporal
+#   9901 PeerDB catalog    9001 MinIO S3 API        9002 MinIO console
+
+# Shared env for the three PeerDB flow services (identical upstream).
+x-peerdb-flow-env: &peerdb-flow-env
+  PEERDB_CLICKHOUSE_AWS_CREDENTIALS_AWS_ACCESS_KEY_ID: ${MINIO_ROOT_USER:-_peerdb_minioadmin}
+  PEERDB_CLICKHOUSE_AWS_CREDENTIALS_AWS_SECRET_ACCESS_KEY: ${MINIO_ROOT_PASSWORD:-_peerdb_minioadmin}
+  PEERDB_CLICKHOUSE_AWS_CREDENTIALS_AWS_REGION: us-east-1
+  # Single-network endpoint: reachable by BOTH flow-worker (writes Avro) and
+  # ClickHouse (reads via s3()). Swap to AWS S3 by unsetting this and setting
+  # real AWS_* creds/region below.
+  PEERDB_CLICKHOUSE_AWS_CREDENTIALS_AWS_ENDPOINT_URL_S3: http://minio:9000
+  PEERDB_CLICKHOUSE_AWS_S3_BUCKET_NAME: ${MINIO_BUCKET:-peerdbbucket}
+  PEERDB_CATALOG_HOST: catalog
+  PEERDB_CATALOG_PORT: 5432
+  PEERDB_CATALOG_USER: postgres
+  PEERDB_CATALOG_PASSWORD: postgres
+  PEERDB_CATALOG_DATABASE: postgres
+  TEMPORAL_HOST_PORT: temporal:7233
+  PEERDB_TEMPORAL_NAMESPACE: default
+  AWS_ACCESS_KEY_ID: ${AWS_ACCESS_KEY_ID:-}
+  AWS_SECRET_ACCESS_KEY: ${AWS_SECRET_ACCESS_KEY:-}
+  AWS_REGION: ${AWS_REGION:-}
+  AWS_ENDPOINT: ${AWS_ENDPOINT:-}
+  PEERDB_ALLOWED_TARGETS:
 
 services:
   # ============================================================
@@ -32,101 +74,194 @@ services:
           memory: 4g
 
   # ============================================================
-  # CDC (PeerDB)
+  # CDC — PeerDB OSS stack (vendored from PeerDB stable-v0.36.26)
   # ============================================================
-  peerdb-catalog:
-    image: postgres:16-alpine
+
+  # Shared PostgreSQL catalog: PeerDB metadata + Temporal persistence.
+  catalog:
     container_name: cce-peerdb-catalog
-    environment:
-      POSTGRES_DB: peerdb
-      POSTGRES_USER: peerdb
-      POSTGRES_PASSWORD: ${PEERDB_CATALOG_PASSWORD:-peerdb_dev}
-    volumes:
-      - peerdb-catalog-data:/var/lib/postgresql/data
-    healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U peerdb"]
-      interval: 5s
-      timeout: 3s
-      retries: 5
-
-  peerdb:
-    image: peerdbio/peerdb-server:stable
-    container_name: cce-peerdb
-    depends_on:
-      peerdb-catalog:
-        condition: service_healthy
+    image: postgres:18-alpine
+    command: -c config_file=/etc/postgresql.conf
+    restart: unless-stopped
     ports:
-      - "8085:8085"   # PeerDB API
-      - "2112:2112"   # Prometheus metrics
+      - "9901:5432"
     environment:
-      PEERDB_CATALOG_HOST: peerdb-catalog
-      PEERDB_CATALOG_PORT: 5432
-      PEERDB_CATALOG_USER: peerdb
-      PEERDB_CATALOG_PASSWORD: ${PEERDB_CATALOG_PASSWORD:-peerdb_dev}
-      PEERDB_CATALOG_DATABASE: peerdb
-    healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:8085/health"]
-      interval: 15s
-      timeout: 5s
-      retries: 10
-      start_period: 30s
-
-  # ============================================================
-  # Visualization (Superset)
-  # ============================================================
-  redis:
-    image: redis:7-alpine
-    container_name: cce-redis
-    ports:
-      - "6379:6379"
-    healthcheck:
-      test: ["CMD", "redis-cli", "ping"]
-      interval: 5s
-      timeout: 3s
-      retries: 5
-
-  superset-db:
-    image: postgres:16-alpine
-    container_name: cce-superset-db
-    environment:
-      POSTGRES_DB: superset
-      POSTGRES_USER: superset
-      POSTGRES_PASSWORD: ${SUPERSET_DB_PASSWORD:-superset_dev}
+      PGUSER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: postgres
+      POSTGRES_INITDB_ARGS: --locale=C.UTF-8
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     volumes:
-      - superset-db-data:/var/lib/postgresql/data
+      - pgdata:/var/lib/postgresql
+      - ./infra/peerdb/volumes/postgresql.conf:/etc/postgresql.conf
+      - ./infra/peerdb/volumes/docker-entrypoint-initdb.d:/docker-entrypoint-initdb.d
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U superset"]
-      interval: 5s
-      timeout: 3s
+      test: ["CMD", "pg_isready", "-d", "postgres", "-U", "postgres"]
+      interval: 10s
+      timeout: 30s
       retries: 5
-
-  superset:
-    build:
-      context: ./docker
-      dockerfile: Dockerfile.superset
-    container_name: cce-superset
-    depends_on:
-      redis:
-        condition: service_healthy
-      superset-db:
-        condition: service_healthy
-      clickhouse:
-        condition: service_healthy
-    ports:
-      - "8088:8088"
-    environment:
-      SUPERSET_SECRET_KEY: ${SUPERSET_SECRET_KEY:-cce-data-pipeline-dev-secret-key-change-in-prod}
-      SUPERSET_LOAD_EXAMPLES: "no"
-      DATABASE_URI: postgresql+psycopg2://superset:${SUPERSET_DB_PASSWORD:-superset_dev}@superset-db:5432/superset
-      REDIS_URL: redis://redis:6379/0
-    volumes:
-      - ./infra/superset/superset_config.py:/app/pythonpath/superset_config.py:ro
-    healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:8088/health"]
-      interval: 15s
-      timeout: 5s
-      retries: 10
       start_period: 60s
+
+  temporal:
+    container_name: cce-temporal
+    image: temporalio/auto-setup:1.29
+    restart: unless-stopped
+    depends_on:
+      catalog:
+        condition: service_healthy
+    environment:
+      - DB=postgres12
+      - DB_PORT=5432
+      - POSTGRES_USER=postgres
+      - POSTGRES_PWD=postgres
+      - POSTGRES_SEEDS=catalog
+      - DYNAMIC_CONFIG_FILE_PATH=config/dynamicconfig/development-sql.yaml
+    ports:
+      - "7233:7233"
+    volumes:
+      - ./infra/peerdb/volumes/temporal-dynamicconfig:/etc/temporal/config/dynamicconfig
+
+  temporal-admin-tools:
+    container_name: cce-temporal-admin-tools
+    image: temporalio/admin-tools:1.25.2-tctl-1.18.1-cli-1.1.1
+    restart: unless-stopped
+    depends_on:
+      - temporal
+    environment:
+      - TEMPORAL_ADDRESS=temporal:7233
+      - TEMPORAL_CLI_ADDRESS=temporal:7233
+      - TEMPORAL_CLI_SHOW_STACKS=1
+    stdin_open: true
+    tty: true
+    entrypoint: /etc/temporal/entrypoint.sh
+    healthcheck:
+      test: ["CMD", "tctl", "workflow", "list"]
+      interval: 1s
+      timeout: 5s
+      retries: 30
+    volumes:
+      - ./infra/peerdb/scripts/mirror-name-search.sh:/etc/temporal/entrypoint.sh
+
+  temporal-ui:
+    container_name: cce-temporal-ui
+    image: temporalio/ui:2.50.0
+    restart: unless-stopped
+    depends_on:
+      - temporal
+    environment:
+      - TEMPORAL_ADDRESS=temporal:7233
+      - TEMPORAL_CORS_ORIGINS=http://localhost:3000
+      - TEMPORAL_CSRF_COOKIE_INSECURE=true
+    ports:
+      - "8085:8080"
+
+  flow-api:
+    container_name: flow_api
+    image: ghcr.io/peerdb-io/flow-api:stable-v0.36.26
+    restart: unless-stopped
+    ports:
+      - "8112:8112"   # gRPC (peerdb nexus → flow_api)
+      - "8113:8113"   # HTTP gateway (peerdb-ui → flow_api)
+    environment: *peerdb-flow-env
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    depends_on:
+      temporal-admin-tools:
+        condition: service_healthy
+
+  flow-snapshot-worker:
+    container_name: cce-flow-snapshot-worker
+    image: ghcr.io/peerdb-io/flow-snapshot-worker:stable-v0.36.26
+    restart: unless-stopped
+    environment: *peerdb-flow-env
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    depends_on:
+      temporal-admin-tools:
+        condition: service_healthy
+
+  flow-worker:
+    container_name: cce-flow-worker
+    image: ghcr.io/peerdb-io/flow-worker:stable-v0.36.26
+    restart: unless-stopped
+    environment: *peerdb-flow-env
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    depends_on:
+      temporal-admin-tools:
+        condition: service_healthy
+
+  # PeerDB nexus — PostgreSQL-wire SQL interface (CREATE PEER / CREATE MIRROR).
+  peerdb:
+    container_name: peerdb-server
+    image: ghcr.io/peerdb-io/peerdb-server:stable-v0.36.26
+    stop_signal: SIGINT
+    restart: unless-stopped
+    environment:
+      PEERDB_CATALOG_HOST: catalog
+      PEERDB_CATALOG_PORT: 5432
+      PEERDB_CATALOG_USER: postgres
+      PEERDB_CATALOG_PASSWORD: postgres
+      PEERDB_CATALOG_DATABASE: postgres
+      PEERDB_PASSWORD: ${PEERDB_PASSWORD:-peerdb}
+      PEERDB_FLOW_SERVER_ADDRESS: grpc://flow_api:8112
+      RUST_LOG: info
+      RUST_BACKTRACE: 1
+    ports:
+      - "9900:9900"
+    depends_on:
+      catalog:
+        condition: service_healthy
+
+  peerdb-ui:
+    container_name: peerdb-ui
+    image: ghcr.io/peerdb-io/peerdb-ui:stable-v0.36.26
+    restart: unless-stopped
+    ports:
+      - "3000:3000"
+    environment:
+      PEERDB_CATALOG_HOST: catalog
+      PEERDB_CATALOG_PORT: 5432
+      PEERDB_CATALOG_USER: postgres
+      PEERDB_CATALOG_PASSWORD: postgres
+      PEERDB_CATALOG_DATABASE: postgres
+      PEERDB_FLOW_SERVER_HTTP: http://flow_api:8113
+      NEXTAUTH_SECRET: ${PEERDB_UI_NEXTAUTH_SECRET:-__changeme__}
+      NEXTAUTH_URL: http://localhost:3000
+      PEERDB_PASSWORD: ${PEERDB_PASSWORD:-peerdb}
+      PEERDB_EXPERIMENTAL_ENABLE_SCRIPTING: "true"
+    depends_on:
+      - flow-api
+
+  minio:
+    image: minio/minio:latest
+    container_name: cce-minio
+    restart: unless-stopped
+    volumes:
+      - minio-data:/data
+    ports:
+      - "9001:9000"    # S3 API
+      - "9002:36987"   # Console
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:-_peerdb_minioadmin}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:-_peerdb_minioadmin}
+      PEERDB_CLICKHOUSE_AWS_S3_BUCKET_NAME: ${MINIO_BUCKET:-peerdbbucket}
+    entrypoint: >
+      /bin/sh -c "
+      minio server /data --console-address=:36987 &
+      sleep 2;
+      mc alias set myminiopeerdb http://minio:9000 $$MINIO_ROOT_USER $$MINIO_ROOT_PASSWORD;
+      mc mb --ignore-existing myminiopeerdb/$$PEERDB_CLICKHOUSE_AWS_S3_BUCKET_NAME;
+      wait
+      "
+
+  # ============================================================
+  # Presentation layer
+  # ============================================================
+  # The analytics serving layer is ClickHouse (cce_analytics). The dashboards/UI live in the
+  # separate cce-insights-service + cce-insights-ui apps, which query ClickHouse directly
+  # (HTTP 8123 or native 9000, user cce_pipeline). They are NOT part of this compose stack.
 
   # ============================================================
   # Monitoring
@@ -155,7 +290,7 @@ services:
       prometheus:
         condition: service_healthy
     ports:
-      - "3000:3000"
+      - "3001:3000"   # host 3001 — PeerDB UI owns 3000
     environment:
       GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_PASSWORD:-admin}
       GF_INSTALL_PLUGINS: grafana-clickhouse-datasource
@@ -170,7 +305,7 @@ services:
 
 volumes:
   clickhouse-data:
-  peerdb-catalog-data:
-  superset-db-data:
   prometheus-data:
   grafana-data:
+  pgdata:
+  minio-data:

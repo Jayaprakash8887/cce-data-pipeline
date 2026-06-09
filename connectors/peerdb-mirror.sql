@@ -1,13 +1,18 @@
--- PeerDB Mirror Configuration
+-- PeerDB Mirror Configuration (PeerDB SQL-interface syntax)
 -- Creates a CDC mirror from PostgreSQL (ccedb) to ClickHouse (cce_analytics)
--- Run via PeerDB UI or CLI: peerdb mirror create --from-file connectors/peerdb-mirror.sql
 --
--- Prerequisites:
+-- This is the canonical CREATE MIRROR definition. scripts/register-connectors.sh
+-- applies it to the PeerDB nexus SQL interface (PostgreSQL wire protocol, port 9900):
+--   PGPASSWORD=$PEERDB_PASSWORD psql "host=localhost port=9900 user=peerdb dbname=peerdb" \
+--     -f connectors/peerdb-mirror.sql
+-- You can also run it by hand the same way.
+--
+-- Prerequisites (run in this order):
 --   1. Run schema/01-create-tables.sql FIRST — tables are pre-created with
 --      ReplacingMergeTree(_peerdb_version, _peerdb_is_deleted) + clean_deleted_rows = 'Always'.
 --      PeerDB will use existing tables; it will NOT recreate them.
 --   2. PostgreSQL: wal_level=logical, REPLICA IDENTITY FULL on all tables (cdc/01-configure-replication.sql)
---   3. PeerDB peers configured: 'ccedb_peer' (PostgreSQL) and 'clickhouse_peer' (ClickHouse)
+--   3. PeerDB peers created via ./scripts/create-peers.sh: 'ccedb_peer' and 'clickhouse_peer'
 
 -- Create the CDC mirror
 CREATE MIRROR cce_analytics_mirror

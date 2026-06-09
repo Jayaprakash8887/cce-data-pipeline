@@ -1,78 +1,85 @@
 #!/usr/bin/env bash
-# Check PeerDB mirror health
-# Usage: ./scripts/check-connector-health.sh [peerdb-url]
+# Check the health of the PeerDB CDC stack and mirror.
+# Usage: ./scripts/check-connector-health.sh
+#
+# Verifies the PeerDB containers are up/healthy, probes the nexus (9900) and
+# flow-api HTTP gateway (8113), and lists the mirror via the nexus `peers`/`mirrors`
+# views. Detailed per-table lag/rows is best viewed in the PeerDB UI (port 3000)
+# or Temporal UI (port 8085).
 
 set -euo pipefail
 
-PEERDB_URL="${1:-http://localhost:8085}"
+PEERDB_HOST="${PEERDB_HOST:-localhost}"
+PEERDB_PORT="${PEERDB_PORT:-9900}"
+PEERDB_USER="${PEERDB_USER:-peerdb}"
+PEERDB_PASSWORD="${PEERDB_PASSWORD:-peerdb}"
+FLOW_API_HTTP="${FLOW_API_HTTP:-http://localhost:8113}"
 
-echo "=== PeerDB Mirror Health Check ==="
+PEERDB_SERVICES=(catalog temporal temporal-admin-tools flow-api flow-snapshot-worker flow-worker peerdb peerdb-ui minio)
+
+echo "=== PeerDB Stack Health ==="
 echo ""
-
-# Check PeerDB API is reachable
-if ! curl -sf "${PEERDB_URL}/health" > /dev/null 2>&1; then
-    echo "✗ PeerDB is not reachable at ${PEERDB_URL}"
-    exit 1
-fi
-echo "✓ PeerDB API reachable"
-echo ""
-
-# List all mirrors and check status
-MIRRORS_JSON=$(curl -sf "${PEERDB_URL}/v1/mirrors" 2>/dev/null || echo '{"mirrors": []}')
-MIRROR_COUNT=$(echo "$MIRRORS_JSON" | python3 -c "
-import sys, json
-data = json.load(sys.stdin)
-mirrors = data.get('mirrors', [])
-print(len(mirrors))
-" 2>/dev/null || echo "0")
-
-if [[ "$MIRROR_COUNT" == "0" ]]; then
-    echo "No mirrors registered"
-    exit 0
-fi
 
 UNHEALTHY=0
 
-echo "$MIRRORS_JSON" | python3 -c "
-import sys, json
-
-data = json.load(sys.stdin)
-mirrors = data.get('mirrors', [])
-
-for m in mirrors:
-    name   = m.get('flow_job_name', m.get('name', 'unknown'))
-    status = m.get('status', 'UNKNOWN')
-    lag    = m.get('cdc_lag_seconds', None)
-    rows   = m.get('rows_synced_total', None)
-
-    mark = '✓' if status == 'RUNNING' else '✗'
-    detail = f'status={status}'
-    if lag is not None:
-        detail += f', lag={lag}s'
-    if rows is not None:
-        detail += f', rows_synced={rows}'
-    print(f'{mark} {name}: {detail}')
-" 2>/dev/null
-
+# 1. Container state (compose project must be running locally)
+echo "--- Containers ---"
+if docker compose ps >/dev/null 2>&1; then
+    for svc in "${PEERDB_SERVICES[@]}"; do
+        STATE=$(docker compose ps --format '{{.State}}' "$svc" 2>/dev/null | head -1)
+        STATE="${STATE:-absent}"
+        if [[ "$STATE" == "running" ]]; then
+            echo "  ✓ ${svc}: running"
+        else
+            echo "  ✗ ${svc}: ${STATE}"
+            UNHEALTHY=$((UNHEALTHY + 1))
+        fi
+    done
+else
+    echo "  (docker compose not available here — skipping container check)"
+fi
 echo ""
 
-# Check specifically for cce_analytics_mirror
-MIRROR_JSON=$(curl -sf "${PEERDB_URL}/v1/mirrors/cce_analytics_mirror" 2>/dev/null || echo '{}')
-STATUS=$(echo "$MIRROR_JSON" | python3 -c "import sys,json; print(json.load(sys.stdin).get('status','NOT_FOUND'))" 2>/dev/null || echo "NOT_FOUND")
-LAG=$(echo "$MIRROR_JSON" | python3 -c "import sys,json; print(json.load(sys.stdin).get('cdc_lag_seconds','N/A'))" 2>/dev/null || echo "N/A")
+# 2. Port probes (TCP)
+echo "--- Endpoints ---"
+probe() {  # probe <label> <host> <port>
+    if timeout 3 bash -c ">/dev/tcp/$2/$3" 2>/dev/null; then
+        echo "  ✓ $1 ($2:$3) reachable"
+    else
+        echo "  ✗ $1 ($2:$3) unreachable"
+        UNHEALTHY=$((UNHEALTHY + 1))
+    fi
+}
+probe "nexus SQL" "$PEERDB_HOST" "$PEERDB_PORT"
+probe "flow-api HTTP" "$(echo "$FLOW_API_HTTP" | sed -E 's#https?://##; s#:.*##')" "$(echo "$FLOW_API_HTTP" | sed -E 's#.*:##')"
+echo ""
 
-if [[ "$STATUS" == "RUNNING" ]]; then
-    echo "✓ cce_analytics_mirror: RUNNING (lag: ${LAG}s)"
+# 3. Mirror listing via nexus
+echo "--- Mirror (nexus) ---"
+if command -v psql >/dev/null 2>&1; then
+    if MIRRORS=$(PGPASSWORD="$PEERDB_PASSWORD" psql \
+            "host=${PEERDB_HOST} port=${PEERDB_PORT} user=${PEERDB_USER} dbname=peerdb" \
+            -tAc "SELECT name FROM mirrors;" 2>/dev/null); then
+        if echo "$MIRRORS" | grep -qw "cce_analytics_mirror"; then
+            echo "  ✓ cce_analytics_mirror present"
+        else
+            echo "  ✗ cce_analytics_mirror not found (mirrors: ${MIRRORS:-none})"
+            UNHEALTHY=$((UNHEALTHY + 1))
+        fi
+    else
+        echo "  (could not query nexus 'mirrors' view — check PeerDB version / nexus up)"
+    fi
 else
-    echo "✗ cce_analytics_mirror: ${STATUS}"
-    UNHEALTHY=$((UNHEALTHY + 1))
+    echo "  (psql not installed — skipping nexus query)"
 fi
 
 echo ""
+echo "Detailed lag/rows-synced: PeerDB UI http://localhost:3000  ·  Temporal UI http://localhost:8085"
+echo ""
 if [[ $UNHEALTHY -eq 0 ]]; then
-    echo "=== ALL MIRRORS HEALTHY ==="
+    echo "=== STACK HEALTHY ==="
     exit 0
 else
-    echo "=== ${UNHEALTHY} UNHEALTHY MIRROR(S) ==="
+    echo "=== ${UNHEALTHY} CHECK(S) FAILED ==="
     exit 1
 fi

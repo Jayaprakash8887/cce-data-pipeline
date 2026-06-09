@@ -17,14 +17,17 @@ flowchart LR
     subgraph Analytics
         CH["ClickHouse<br/>(ReplacingMergeTree)"]
         MV["Materialized Views<br/>(Pre-aggregation)"]
-        SS["Apache Superset"]
+    end
+
+    subgraph Presentation["Presentation (separate repos)"]
+        SVC["cce-insights-service / cce-insights-ui"]
     end
 
     PG -->|WAL| PEER
     PEER -->|S3/MinIO stage| CH
     CH -->|INSERT triggers| MV
-    CH --> SS
-    MV --> SS
+    CH --> SVC
+    MV --> SVC
 ```
 
 **Core principle:** Analytics should be purely on committed data in the database. This ensures:
@@ -80,7 +83,7 @@ All 11 ClickHouse tables are **pre-created** via `schema/01-create-tables.sql` b
 **Delete handling:**
 - PeerDB sets `_peerdb_is_deleted=1` (soft-delete flag) for PostgreSQL DELETEs (`soft_delete=true` in mirror config)
 - `clean_deleted_rows = 'Always'` physically removes deleted rows during background merges — no `WHERE _peerdb_is_deleted = false` filter needed in queries
-- The `cce_pipeline` user profile has `final=1` so all ad-hoc Superset queries automatically apply FINAL
+- The `cce_pipeline` user profile has `final=1` so all reads from `cce-insights-service` (and ad-hoc queries) automatically apply FINAL
 
 ---
 

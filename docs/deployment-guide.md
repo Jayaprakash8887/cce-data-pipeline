@@ -31,7 +31,7 @@
 - [ ] PeerDB deployed (OSS Docker or managed)
 - [ ] MinIO/S3 configured for PeerDB staging
 - [ ] Network connectivity verified between all services
-- [ ] DNS entries configured for Superset/Grafana
+- [ ] DNS entries configured for Grafana (and the external `cce-insights-ui`)
 - [ ] Docker + Docker Compose v2 (development) or Kubernetes 1.28+ (production)
 
 ### PostgreSQL Configuration
@@ -78,12 +78,12 @@ CREATE PUBLICATION cce_analytics_pub FOR TABLE
 
 | Secret | Purpose | Required By |
 |--------|---------|-------------|
-| `CLICKHOUSE_PASSWORD` | ClickHouse pipeline user | peerdb, superset |
-| `CDC_PASSWORD` | PostgreSQL replication user | peerdb |
-| `SUPERSET_SECRET_KEY` | Session encryption | superset |
-| `SUPERSET_DB_PASSWORD` | Metadata DB | superset |
+| `CLICKHOUSE_PASSWORD` | ClickHouse `cce_pipeline` user | peerdb, cce-insights-service |
+| `CDC_PASSWORD` | PostgreSQL replication user | peerdb (create-peers.sh) |
+| `PEERDB_PASSWORD` | PeerDB nexus auth | connector scripts |
+| `MINIO_ROOT_PASSWORD` | MinIO / PeerDB S3 staging | minio, flow workers |
 | `GRAFANA_PASSWORD` | Admin password | grafana |
-| `KEYCLOAK_CLIENT_SECRET` | Superset OAuth2 | superset |
+
 
 ---
 
@@ -102,18 +102,47 @@ For resource sizing (dev vs prod), see [Architecture Overview § 8.3](architectu
 
 ### 2.2 PeerDB
 
-PeerDB replicates PostgreSQL WAL directly to ClickHouse. Deployed as Docker containers.
+PeerDB replicates PostgreSQL WAL to ClickHouse. The full OSS stack (pinned `stable-v0.36.26`)
+runs in `docker-compose.yml`; support files are vendored under `infra/peerdb/`.
 
-- **Components:** PeerDB server + Temporal (workflow engine) + PostgreSQL (metadata)
-- **Staging:** MinIO (local) or S3 (production) for intermediary data transfer
-- **Port:** 3000 (PeerDB UI)
+- **Services:** `catalog` (PG metadata + Temporal store), `temporal` (+ `temporal-admin-tools`, `temporal-ui`), `flow-api` (gRPC 8112 / HTTP 8113), `flow-snapshot-worker`, `flow-worker`, `peerdb` (nexus SQL), `peerdb-ui`, `minio`
+- **Staging:** MinIO (mandatory — Avro stage for the ClickHouse loader). Swappable to AWS S3 via `AWS_*` env. See [§ MinIO/S3](#minio-vs-s3)
+- **Interfaces:** nexus SQL **9900** (`CREATE PEER`/`CREATE MIRROR`), PeerDB UI **3000**, Temporal UI **8085**
+- **Catalog port:** 9901 (PG metadata, internal)
 
-### 2.3 Apache Superset
+#### MinIO vs S3
 
-- **Port:** 8088
-- **Dependencies:** Redis (cache), PostgreSQL (metadata DB)
-- **ClickHouse connection:** `clickhousedb://cce_pipeline:***@clickhouse:8123/cce_analytics`
-- **OAuth2/OIDC:** Keycloak integration for production
+PeerDB's ClickHouse loader **requires** an S3-compatible object store: each CDC batch is
+written as Avro to a bucket, then pulled into ClickHouse via `s3()`. There is no direct-insert
+path — the object store is mandatory, not optional.
+
+The stack ships **MinIO** (self-hosted, fully supported in production). The endpoint
+(`http://minio:9000`) is reachable by both the flow-worker (writes) and ClickHouse (reads),
+since all services share one Docker network. Set real credentials in `.env`:
+
+```bash
+MINIO_ROOT_USER=cce_minio
+MINIO_ROOT_PASSWORD=<change-me>
+MINIO_BUCKET=peerdbbucket
+```
+
+To use **AWS S3** instead: set `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY` / `AWS_REGION`
+in `.env`, point `PEERDB_CLICKHOUSE_AWS_CREDENTIALS_AWS_*` at the AWS bucket (and drop the
+`...AWS_ENDPOINT_URL_S3: http://minio:9000` line in `docker-compose.yml`'s `x-peerdb-flow-env`),
+and you can remove the `minio` service. No other topology changes.
+
+> **MinIO in production:** give it a persistent volume (already wired: `minio-data`),
+> non-default credentials, ideally TLS, and treat it as a stateful component (backup + monitor).
+
+### 2.3 Presentation layer (external)
+
+Dashboards/UI are **not** deployed by this repo. `cce-insights-service` + `cce-insights-ui`
+(separate repos) connect to ClickHouse and serve the clinical views:
+
+- **ClickHouse connection:** host `clickhouse` (in-network) or the published host, HTTP `8123`
+  / native `9000`, database `cce_analytics`, user `cce_pipeline` (read-only, `final=1`)
+- **AuthN/AuthZ (incl. Keycloak):** handled by `cce-insights-service`
+- Reuse the queries in [`docs/query-reference/`](query-reference/)
 
 ### 2.4 Prometheus + Grafana
 
@@ -136,17 +165,12 @@ docker compose up -d
 docker compose ps
 
 # View logs
-docker compose logs -f peerdb-server
+docker compose logs -f peerdb
 ```
 
-**Services started:** `clickhouse`, `peerdb-server`, `peerdb-temporal`, `peerdb-catalog`, `minio`, `redis`, `superset-db`, `superset`, `prometheus`, `grafana`
+**Services started:** `clickhouse`, `catalog`, `temporal`, `temporal-admin-tools`, `temporal-ui`, `flow-api`, `flow-snapshot-worker`, `flow-worker`, `peerdb` (nexus), `peerdb-ui`, `minio`, `prometheus`, `grafana`
 
-**Volumes:** `clickhouse-data`, `superset-db-data`, `prometheus-data`, `grafana-data`, `minio-data`
-
-### Build Custom Images
-```bash
-docker build -t cce-superset:latest -f docker/Dockerfile.superset ./docker
-```
+**Volumes:** `clickhouse-data`, `prometheus-data`, `grafana-data`, `pgdata` (PeerDB catalog), `minio-data`
 
 ---
 
@@ -156,21 +180,23 @@ docker build -t cce-superset:latest -f docker/Dockerfile.superset ./docker
 ```
 cce-analytics/
 ├── clickhouse (StatefulSet, 1 replica)
-├── peerdb (Deployment, 1 replica + Temporal sidecar)
-├── minio (StatefulSet, 1 replica) or S3
-├── superset-web (Deployment, 2 replicas)
-├── superset-worker (Deployment, 2 replicas)
-├── superset-db (StatefulSet or managed RDS)
-├── redis (Deployment, 1 replica)
+├── catalog (StatefulSet — PeerDB metadata + Temporal store)
+├── temporal (+ temporal-admin-tools, temporal-ui)
+├── flow-api / flow-snapshot-worker / flow-worker (Deployments)
+├── peerdb (nexus, Deployment) + peerdb-ui (Deployment)
+├── minio (StatefulSet, 1 replica) or external S3
 ├── prometheus (StatefulSet, 1 replica)
 └── grafana (Deployment, 1 replica)
 ```
 
+> `cce-insights-service` / `cce-insights-ui` are deployed from their own repos/charts and
+> are not part of this namespace layout; they need network access to ClickHouse.
+
 ### Key K8s Resources
-- **PersistentVolumeClaims:** ClickHouse data (500 GB), Prometheus TSDB (50 GB)
-- **ConfigMaps:** Prometheus config, Grafana dashboards, ClickHouse server config
+- **PersistentVolumeClaims:** ClickHouse data (500 GB), PeerDB catalog (`pgdata`), MinIO, Prometheus TSDB (50 GB)
+- **ConfigMaps:** Prometheus config, Grafana dashboards, ClickHouse server config, PeerDB support files (`infra/peerdb/`)
 - **Secrets:** All passwords, connection strings
-- **Services:** ClusterIP for internal; LoadBalancer/Ingress for Superset, Grafana
+- **Services:** ClusterIP for internal; LoadBalancer/Ingress for Grafana, PeerDB UI
 
 ---
 
@@ -178,51 +204,68 @@ cce-analytics/
 
 ```mermaid
 flowchart TD
-    A["1. ClickHouse + MinIO"] --> B["2. Run schema/01 (pre-create tables)"]
-    B --> C["3. PeerDB (create mirror — uses existing tables)"]
-    C --> D["4. Wait for initial snapshot"]
-    D --> E["5. Create MVs + Indexes (schema/02-04)"]
-    E --> F["6. Backfill MVs with snapshot data"]
-    F --> G["7. Redis + Superset DB"]
-    G --> H["8. Superset (init + start)"]
-    H --> I["9. Prometheus + Grafana"]
+    A["1. ClickHouse + MinIO/S3"] --> B["2. Run schema/01 (pre-create tables)"]
+    B --> PG["3. Configure PG replication (cdc/01-configure-replication.sql)"]
+    PG --> P["4. create-peers.sh (ccedb_peer + clickhouse_peer)"]
+    P --> C["5. register-connectors.sh (create mirror — uses existing tables)"]
+    C --> D["6. Wait for initial snapshot (check-connector-health.sh)"]
+    D --> E["7. Create MVs + Indexes + Dicts (schema/02-04)"]
+    E --> F["8. Backfill MVs with snapshot data"]
+    F --> I["9. Prometheus + Grafana"]
+    I --> J["10. Point cce-insights-service at ClickHouse (separate repo)"]
 ```
+
+> **Source PostgreSQL (`ccedb`) is not part of this stack** — it is the existing CCE
+> operational database. Steps 3–5 target it remotely (host/credentials from `.env`).
+> In `docker-compose.yml`, the `./schema` directory is mounted into ClickHouse's
+> `docker-entrypoint-initdb.d`, so schema/01–04 run automatically on first boot; the
+> manual schema steps below are for production or re-runs.
 
 ---
 
 ## 6. PeerDB Mirror Setup
 
-### Create PostgreSQL and ClickHouse Peers (via PeerDB UI or CLI)
+Peers and the mirror are managed through PeerDB's **nexus SQL interface** on **port 9900**
+(`CREATE PEER` / `CREATE MIRROR`, applied with `psql`). The repo scripts wrap this and read
+all connection details from `.env`. They are **not** run automatically by `docker compose up` —
+run them after the stack is healthy.
 
 ```bash
-# Access PeerDB UI at http://localhost:3000
-# Create peers:
-#   1. PostgreSQL peer: host=cce-postgres, port=5432, db=ccedb, user=cce_cdc_user
-#   2. ClickHouse peer: host=clickhouse, port=9000, db=cce_analytics, user=cce_pipeline
+set -a; source .env; set +a   # PG_*/CDC_*, CH_*, PEERDB_PASSWORD, etc.
 ```
 
-### Create Mirror
+### Step A — Create Peers
 
-Apply the mirror configuration:
+`create-peers.sh` registers `ccedb_peer` (PostgreSQL source) and `clickhouse_peer`
+(ClickHouse destination) via the nexus:
+
 ```bash
-# Via PeerDB SQL interface or UI
-psql "host=localhost port=9900 dbname=peerdb" < connectors/peerdb-mirror.sql
+./scripts/create-peers.sh
 ```
 
-### Verify Mirror Running
+> The ClickHouse peer uses the **native** port (9000), not the HTTP port (8123). S3/MinIO
+> staging creds come from the flow services' env, not the peer definition.
+
+### Step B — Create Mirror
+
+`register-connectors.sh` applies `connectors/peerdb-mirror.sql` (the `CREATE MIRROR`
+statement) to the nexus:
+
 ```bash
-# Check mirror status via PeerDB UI at http://localhost:3000
-# Or query PeerDB catalog:
-psql "host=localhost port=9900 dbname=peerdb" \
-  -c "SELECT mirror_name, mirror_state FROM peerdb.mirrors;"
+./scripts/register-connectors.sh
 ```
 
-### Monitor Initial Snapshot Progress
+This creates `cce_analytics_mirror` with `do_initial_snapshot=true`, `soft_delete=true`,
+publication `cce_analytics_pub`, and slot `cce_analytics_slot`.
+
+### Verify Mirror Running & Monitor Snapshot
+
 ```bash
-# Check rows synced per table
-psql "host=localhost port=9900 dbname=peerdb" \
-  -c "SELECT table_name, rows_synced FROM peerdb.mirror_stats WHERE mirror_name='cce_analytics_mirror';"
+./scripts/check-connector-health.sh          # container health + nexus/flow-api probes + mirror presence
 ```
+
+Per-table lag and rows-synced are best viewed in the **PeerDB UI** (http://localhost:3000)
+or **Temporal UI** (http://localhost:8085).
 
 ---
 
@@ -243,11 +286,15 @@ clickhouse-client --host "$CH_HOST" --user "$CH_USER" --password "$CH_PASS" \
   --multiquery < schema/01-create-tables.sql
 ```
 
-### Step 2 — Start PeerDB mirror and wait for snapshot
+### Step 2 — Create peers, start the mirror, and wait for snapshot
+
+See [§6 PeerDB Mirror Setup](#6-peerdb-mirror-setup) for details.
 
 ```bash
-psql "host=localhost port=9900 dbname=peerdb" < connectors/peerdb-mirror.sql
-# Monitor snapshot progress in PeerDB UI at http://localhost:3000
+set -a; source .env; set +a
+./scripts/create-peers.sh            # ccedb_peer + clickhouse_peer (nexus SQL @ :9900)
+./scripts/register-connectors.sh     # cce_analytics_mirror (initial snapshot)
+./scripts/check-connector-health.sh  # container health + mirror presence
 ```
 
 ### Step 3 — Create MVs, indexes, and dictionaries (AFTER snapshot completes)
@@ -288,9 +335,11 @@ clickhouse-client --host "$CH_HOST" --user "$CH_USER" --password "$CH_PASS" \
 | Tables exist | `clickhouse-client -q "SELECT count() FROM system.tables WHERE database='cce_analytics'"` | `>= 11` |
 | MVs exist | `clickhouse-client -q "SELECT count() FROM system.tables WHERE database='cce_analytics' AND engine LIKE '%View%'"` | `>= 14` |
 | Data flowing | `clickhouse-client -q "SELECT name, total_rows FROM system.tables WHERE database='cce_analytics' AND total_rows > 0"` | Tables with rows |
-| PeerDB mirror | `psql "host=localhost port=9900 dbname=peerdb" -c "SELECT mirror_state FROM peerdb.mirrors"` | `active` |
-| Superset | `curl -s http://localhost:8088/health` | `OK` |
-| Grafana | `curl -s http://localhost:3000/api/health` | `{"database":"ok"}` |
+| PeerDB stack + mirror | `./scripts/check-connector-health.sh` | `STACK HEALTHY` |
+| PeerDB nexus | `PGPASSWORD=$PEERDB_PASSWORD psql "host=localhost port=9900 user=peerdb dbname=peerdb" -c 'SELECT name FROM peers'` | lists `ccedb_peer`, `clickhouse_peer` |
+| PeerDB UI | `curl -s http://localhost:3000/api/health` (or browse) | reachable |
+| MinIO | `curl -s http://localhost:9001/minio/health/live` | `200` |
+| Grafana | `curl -s http://localhost:3001/api/health` | `{"database":"ok"}` |
 
 ---
 
@@ -355,34 +404,23 @@ Configure in Grafana → Alerting → Contact Points:
 
 ### Full Re-snapshot
 
-If ClickHouse data is lost or needs full refresh:
+If ClickHouse data is lost or needs full refresh, use the re-snapshot helper — it drops
+and recreates the mirror via the nexus SQL interface (`DROP MIRROR` → `register-connectors.sh`)
+and truncates the MV backing tables first to avoid double-counting:
 
 ```bash
-# 1. Drop the mirror
-psql "host=localhost port=9900 dbname=peerdb" \
-  -c "DROP MIRROR cce_analytics_mirror;"
-
-# 2. Truncate ClickHouse tables
-clickhouse-client -q "TRUNCATE TABLE cce_analytics.inbound_event_logs"
-# (repeat for other tables or drop/recreate database)
-
-# 3. Recreate mirror (triggers full initial snapshot)
-psql "host=localhost port=9900 dbname=peerdb" < connectors/peerdb-mirror.sql
-
-# 4. Wait for snapshot to complete, then re-apply MVs, indexes, and dictionaries
-clickhouse-client --database cce_analytics --multiquery < schema/02-create-materialized-views.sql
-clickhouse-client --database cce_analytics --multiquery < schema/03-create-indexes-projections.sql
-clickhouse-client --database cce_analytics --multiquery < schema/04-create-dictionary.sql
+set -a; source .env; set +a
+./scripts/replay-dlq.sh
 ```
+
+The script drops `cce_analytics_mirror`, truncates the `mv_*` backing tables, then recreates
+the mirror with `do_initial_snapshot=true`. Base tables (schema/01) stay in place — see
+[Recreating / Backfilling an MV Safely](#recreating--backfilling-an-mv-safely).
 
 ### Partial Table Resync
 
-PeerDB supports resyncing individual tables without dropping the entire mirror:
-
-```bash
-# Resync a specific table via PeerDB UI
-# Navigate to Mirrors → cce_analytics_mirror → Resync Table → select table
-```
+PeerDB supports resyncing individual tables without dropping the entire mirror via the
+PeerDB UI (http://localhost:3000 → Mirrors → cce_analytics_mirror → Resync Table → select table).
 
 ---
 
@@ -390,14 +428,15 @@ PeerDB supports resyncing individual tables without dropping the entire mirror:
 
 ### PeerDB Mirror Rollback
 ```bash
-# Pause mirror (stop CDC without dropping state)
-# Via PeerDB UI: Mirrors → cce_analytics_mirror → Pause
+set -a; source .env; set +a
 
-# Drop and recreate with previous config if needed
-psql "host=localhost port=9900 dbname=peerdb" \
-  -c "DROP MIRROR cce_analytics_mirror;"
-psql "host=localhost port=9900 dbname=peerdb" < connectors/peerdb-mirror.sql
+# Drop the mirror (via the nexus SQL interface), then recreate from the committed config
+PGPASSWORD="$PEERDB_PASSWORD" psql "host=localhost port=9900 user=peerdb dbname=peerdb" \
+  -c "DROP MIRROR IF EXISTS cce_analytics_mirror;"
+./scripts/register-connectors.sh
 ```
+
+> Pause/resume of a running mirror is available in the PeerDB UI (http://localhost:3000).
 
 ### ClickHouse Schema Rollback
 ```bash
@@ -446,7 +485,7 @@ clickhouse-client --query "
 # UI: Mirrors → cce_analytics_mirror → Resume
 
 # Restart PeerDB server
-docker compose restart peerdb-server
+docker compose restart peerdb
 ```
 
 ### Materialized View Backfill
@@ -480,13 +519,51 @@ WHERE <source_conditions>;
 
 > **Note**: For `AggregatingMergeTree` MVs using `-State` functions, the backfill SELECT must use the same `-State` aggregate functions (e.g., `countState()`, `uniqState()`) — not their plain counterparts.
 
+### Recreating / Backfilling an MV Safely
+
+Each MV is **two objects** (see `schema/02-create-materialized-views.sql`):
+
+| Object | Example | Role |
+|--------|---------|------|
+| Backing table | `mv_event_volume_hourly` | Stores the aggregated data; queried by dashboards |
+| Trigger view (`_mv` suffix) | `mv_event_volume_hourly_mv` | Fires on INSERT, writes into the backing table via `TO` |
+
+Because the trigger uses `TO <backing_table>` (not an implicit `.inner_id.<uuid>` table), the two can be managed independently.
+
+**Fix a trigger's SELECT logic without losing data:**
+
+```sql
+-- Drops ONLY the trigger. The backing table and all accumulated aggregates survive.
+DROP VIEW cce_analytics.mv_event_volume_hourly_mv;
+
+-- Recreate with the corrected SELECT. New inserts resume flowing into the existing backing table.
+CREATE MATERIALIZED VIEW cce_analytics.mv_event_volume_hourly_mv
+TO cce_analytics.mv_event_volume_hourly
+AS SELECT ... ;
+```
+
+> With the old implicit-inner-table pattern, `DROP VIEW` would have destroyed the inner table and all its data. The `TO` pattern makes trigger logic safely replaceable.
+
+**⚠️ The backfill double-count race**
+
+An MV trigger captures rows inserted **after** it is created. A backfill `INSERT INTO <backing_table> SELECT ... FROM <base_table>` reads **everything currently in the base table**. If CDC is actively inserting while you backfill, rows that arrived *after* trigger creation are counted **twice** — once by the live trigger, once by the backfill. With `SummingMergeTree`/`AggregatingMergeTree` this inflation is silent.
+
+Safe procedures (pick one):
+
+| Approach | Steps | Tradeoff |
+|----------|-------|----------|
+| **MV-before-data** | Create the trigger *before* the base table receives rows (run schema/02 between schema/01 and the PeerDB mirror). Snapshot INSERTs populate the MV automatically — no backfill. | MV overhead (incl. `mv_deviation_by_patient` FINAL join) during the bulk snapshot load |
+| **Quiet-window backfill** | 1. Pause the PeerDB mirror (UI → Pause). 2. `TRUNCATE TABLE <backing_table>` if re-backfilling. 3. Run the backfill `INSERT`. 4. Resume the mirror. | Brief CDC lag while paused |
+
+> When re-backfilling an existing backing table, `TRUNCATE TABLE cce_analytics.<backing_table>` first — otherwise the backfill adds to the data already accumulated by the live trigger, compounding the double-count.
+
 ### Scaling Guidance
 
 | Component | Scaling Strategy |
 |-----------|-----------------|
 | ClickHouse | Add replicas (ReplicatedMergeTree), shard for > 1TB/day |
-| PeerDB | Increase `snapshot_max_parallel_workers`; use dedicated instance |
-| Superset | Add Celery workers for async queries |
+| PeerDB | Increase `snapshot_max_parallel_workers`; scale `flow-worker`; dedicated catalog |
+| MinIO | Scale to distributed MinIO or switch to S3 for high snapshot throughput |
 
 ---
 
@@ -494,24 +571,23 @@ WHERE <source_conditions>;
 
 ### PeerDB Mirror Not Starting
 ```bash
-# Check mirror status
-psql "host=localhost port=9900 dbname=peerdb" \
-  -c "SELECT mirror_name, mirror_state, error FROM peerdb.mirrors;"
+# Check mirror status + lag
+./scripts/check-connector-health.sh
 
 # Check PeerDB logs
-docker compose logs peerdb-server | grep ERROR
+docker compose logs peerdb | grep -i error
 
 # Common fixes:
+# - Peers missing: re-run ./scripts/create-peers.sh (ccedb_peer / clickhouse_peer)
 # - PostgreSQL: verify wal_level=logical, replication slot exists, REPLICA IDENTITY FULL
-# - ClickHouse: verify database/user exists, network connectivity
-# - MinIO: verify bucket exists and is accessible
+#   (./scripts/validate-cdc-config.sh <pg-host> <pg-port> <pg-user> ccedb)
+# - ClickHouse: verify database/user exists, native port 9000 reachable from PeerDB
 ```
 
 ### Data Not Appearing in ClickHouse
 ```bash
-# Check PeerDB sync stats
-psql "host=localhost port=9900 dbname=peerdb" \
-  -c "SELECT table_name, rows_synced, last_synced_at FROM peerdb.mirror_stats WHERE mirror_name='cce_analytics_mirror';"
+# Check mirror sync stats (rows synced, lag)
+./scripts/check-connector-health.sh
 
 # Check ClickHouse insert errors
 clickhouse-client -q "SELECT * FROM system.query_log WHERE type='ExceptionWhileProcessing' ORDER BY event_time DESC LIMIT 5"
