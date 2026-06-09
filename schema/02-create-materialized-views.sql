@@ -54,8 +54,8 @@ GROUP BY hour, facility_id, source, event_type, resource_type;
 -- status counts.
 CREATE TABLE IF NOT EXISTS mv_compliance_summary (
     protocol_definition_id UUID,
-    first_enrolled         AggregateFunction(min, DateTime64(3)),
-    last_updated           AggregateFunction(max, DateTime64(3))
+    first_enrolled         AggregateFunction(min, DateTime64(6)),
+    last_updated           AggregateFunction(max, DateTime64(6))
 ) ENGINE = AggregatingMergeTree()
 ORDER BY (protocol_definition_id);
 
@@ -239,8 +239,8 @@ CREATE TABLE IF NOT EXISTS mv_compliance_by_patient (
     patient_id             String,
     protocol_definition_id UUID,
     protocol_canonical     AggregateFunction(any, String),
-    first_enrolled         AggregateFunction(min, DateTime64(3)),
-    last_updated           AggregateFunction(max, DateTime64(3))
+    first_enrolled         AggregateFunction(min, DateTime64(6)),
+    last_updated           AggregateFunction(max, DateTime64(6))
 ) ENGINE = AggregatingMergeTree()
 ORDER BY (patient_id, protocol_definition_id);
 
