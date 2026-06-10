@@ -7,7 +7,7 @@
 3. [Docker Compose (Development)](#3-docker-compose-development)
 4. [Kubernetes (Production)](#4-kubernetes-production)
 5. [Bootstrap Order](#5-bootstrap-order)
-6. [PeerDB Mirror Setup](#6-peerdb-mirror-setup)
+6. [Debezium Connector Setup](#6-debezium-connector-setup)
 7. [Schema Deployment](#7-schema-deployment)
 8. [Post-Deployment Validation](#8-post-deployment-validation)
 9. [Monitoring & Observability](#9-monitoring--observability)
@@ -27,9 +27,9 @@
 - [ ] PostgreSQL replication slot created: `cce_analytics_slot`
 - [ ] PostgreSQL publication created: `cce_analytics_pub`
 - [ ] ClickHouse database `cce_analytics` created
-- [ ] ClickHouse users `cce_pipeline` (analytics, readonly) and `cce_cdc_writer` (PeerDB write access) created with appropriate grants
-- [ ] PeerDB deployed (OSS Docker or managed)
-- [ ] MinIO/S3 configured for PeerDB staging
+- [ ] ClickHouse user `cce_pipeline` (analytics, readonly) created with grants
+- [ ] Kafka Connect (Debezium) worker deployed on cce-net (this repo)
+- [ ] Kafka broker reachable from Kafka Connect + ClickHouse (platform cce-net)
 - [ ] Network connectivity verified between all services
 - [ ] DNS entries configured for Grafana (and the external `cce-insights-ui`)
 - [ ] Docker + Docker Compose v2 (development) or Kubernetes 1.28+ (production)
@@ -44,7 +44,7 @@ ALTER SYSTEM SET max_slot_wal_keep_size = '10GB';
 -- Create CDC user with replication permissions
 CREATE USER cce_cdc_user WITH REPLICATION PASSWORD '***';
 GRANT SELECT ON ALL TABLES IN SCHEMA public TO cce_cdc_user;
-GRANT CREATE ON DATABASE ccedb TO cce_cdc_user;  -- PeerDB needs to create publication
+-- publication is created by cdc/01-configure-replication.sql (run as a privileged role)
 
 -- Set REPLICA IDENTITY FULL on all CDC tables (required for TOAST columns)
 ALTER TABLE inbound_event_log REPLICA IDENTITY FULL;
@@ -74,10 +74,8 @@ CREATE PUBLICATION cce_analytics_pub FOR TABLE
 
 | Secret | Purpose | Required By |
 |--------|---------|-------------|
-| `CLICKHOUSE_PASSWORD` | ClickHouse `cce_pipeline` user | peerdb, cce-insights-service |
-| `CDC_PASSWORD` | PostgreSQL replication user | peerdb (create-peers.sh) |
-| `PEERDB_PASSWORD` | PeerDB nexus auth | connector scripts |
-| `MINIO_ROOT_PASSWORD` | MinIO / PeerDB S3 staging | minio, flow workers |
+| `CLICKHOUSE_PASSWORD` | ClickHouse `cce_pipeline` user | clickhouse, cce-insights-service |
+| `CDC_PASSWORD` | PostgreSQL replication user | Debezium connector |
 | `GRAFANA_PASSWORD` | Admin password | grafana |
 
 
@@ -87,7 +85,7 @@ CREATE PUBLICATION cce_analytics_pub FOR TABLE
 
 ### 2.1 ClickHouse
 
-Single-node deployment with `ReplacingMergeTree(_peerdb_version, _peerdb_is_deleted)` tables (pre-created via `schema/01-create-tables.sql` before PeerDB mirror setup).
+Single-node deployment with `ReplacingMergeTree(_version, _is_deleted)` tables (schema/01), populated by the Kafka-engine consumer MVs (schema/02).
 
 - **Database:** `cce_analytics`
 - **User:** `cce_pipeline`
@@ -96,39 +94,21 @@ Single-node deployment with `ReplacingMergeTree(_peerdb_version, _peerdb_is_dele
 
 For resource sizing (dev vs prod), see [Architecture Overview § 8.3](architecture-overview.md#83-resource-requirements).
 
-### 2.2 PeerDB
+### 2.2 Debezium on Kafka Connect
 
-PeerDB replicates PostgreSQL WAL to ClickHouse. The full OSS stack (pinned `stable-v0.36.26`)
-runs in `docker-compose.yml`; support files are vendored under `infra/peerdb/`.
+A single Kafka Connect worker (`quay.io/debezium/connect:3.0.0.Final`) runs the Debezium
+PostgreSQL **source** connector. It joins the external `cce-net` network to reach the existing
+Kafka broker and `ccedb`.
 
-- **Services:** `catalog` (PG metadata + Temporal store), `temporal` (+ `temporal-admin-tools`, `temporal-ui`), `flow-api` (gRPC 8112 / HTTP 8113), `flow-snapshot-worker`, `flow-worker`, `peerdb` (nexus SQL), `peerdb-ui`, `minio`
-- **Staging:** MinIO (mandatory — Avro stage for the ClickHouse loader). Swappable to AWS S3 via `AWS_*` env. See [§ MinIO/S3](#minio-vs-s3)
-- **Interfaces:** nexus SQL **9900** (`CREATE PEER`/`CREATE MIRROR`), PeerDB UI **3000**, Temporal UI **8085**
-- **Catalog port:** 9901 (PG metadata, internal)
+- **Connector:** `cce-ccedb-source` (config in `connectors/debezium-postgres-source.json`),
+  registered via the Connect REST API (`:8083`)
+- **Source:** `ccedb` via `pgoutput`, publication `cce_analytics_pub`, slot `cce_analytics_slot`
+- **Topics:** `cce.public.<table>` (JSON, schemas disabled — no Schema Registry)
+- **TOAST:** ReselectColumns post-processor (re-reads unchanged large JSONB from the source)
+- **Sink:** none — ClickHouse consumes the topics with its Kafka table engine (schema/02)
 
-#### MinIO vs S3
-
-PeerDB's ClickHouse loader **requires** an S3-compatible object store: each CDC batch is
-written as Avro to a bucket, then pulled into ClickHouse via `s3()`. There is no direct-insert
-path — the object store is mandatory, not optional.
-
-The stack ships **MinIO** (self-hosted, fully supported in production). The endpoint
-(`http://minio:9000`) is reachable by both the flow-worker (writes) and ClickHouse (reads),
-since all services share one Docker network. Set real credentials in `.env`:
-
-```bash
-MINIO_ROOT_USER=cce_minio
-MINIO_ROOT_PASSWORD=<change-me>
-MINIO_BUCKET=peerdbbucket
-```
-
-To use **AWS S3** instead: set `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY` / `AWS_REGION`
-in `.env`, point `PEERDB_CLICKHOUSE_AWS_CREDENTIALS_AWS_*` at the AWS bucket (and drop the
-`...AWS_ENDPOINT_URL_S3: http://minio:9000` line in `docker-compose.yml`'s `x-peerdb-flow-env`),
-and you can remove the `minio` service. No other topology changes.
-
-> **MinIO in production:** give it a persistent volume (already wired: `minio-data`),
-> non-default credentials, ideally TLS, and treat it as a stateful component (backup + monitor).
+> Kafka itself (`confluentinc/cp-kafka`, KRaft) is provided by the platform stack; this repo only
+> adds the Connect worker.
 
 ### 2.3 Presentation layer (external)
 
@@ -161,12 +141,13 @@ docker compose up -d
 docker compose ps
 
 # View logs
-docker compose logs -f peerdb
+docker compose logs -f kafka-connect
 ```
 
-**Services started:** `clickhouse`, `catalog`, `temporal`, `temporal-admin-tools`, `temporal-ui`, `flow-api`, `flow-snapshot-worker`, `flow-worker`, `peerdb` (nexus), `peerdb-ui`, `minio`, `prometheus`, `grafana`
+**Services started (this repo):** `clickhouse`, `kafka-connect`. Everything else (Kafka, `ccedb`,
+Prometheus/Grafana, insights apps) is provided by the platform stack on `cce-net`.
 
-**Volumes:** `clickhouse-data`, `prometheus-data`, `grafana-data`, `pgdata` (PeerDB catalog), `minio-data`
+**Volumes:** `clickhouse-data`
 
 ---
 
@@ -174,25 +155,20 @@ docker compose logs -f peerdb
 
 ### Namespace Layout
 ```
-cce-analytics/
+cce-analytics/   (this repo — joins the platform's Kafka/Postgres/monitoring)
 ├── clickhouse (StatefulSet, 1 replica)
-├── catalog (StatefulSet — PeerDB metadata + Temporal store)
-├── temporal (+ temporal-admin-tools, temporal-ui)
-├── flow-api / flow-snapshot-worker / flow-worker (Deployments)
-├── peerdb (nexus, Deployment) + peerdb-ui (Deployment)
-├── minio (StatefulSet, 1 replica) or external S3
-├── prometheus (StatefulSet, 1 replica)
-└── grafana (Deployment, 1 replica)
+└── kafka-connect (Deployment, Debezium source connector)
 ```
 
-> `cce-insights-service` / `cce-insights-ui` are deployed from their own repos/charts and
-> are not part of this namespace layout; they need network access to ClickHouse.
+> Kafka, `ccedb`, Prometheus/Grafana, and `cce-insights-service`/`ui` are deployed by the
+> platform stack; this namespace only adds ClickHouse + the Connect worker, which need network
+> access to the platform's Kafka broker and `ccedb`.
 
 ### Key K8s Resources
-- **PersistentVolumeClaims:** ClickHouse data (500 GB), PeerDB catalog (`pgdata`), MinIO, Prometheus TSDB (50 GB)
-- **ConfigMaps:** Prometheus config, Grafana dashboards, ClickHouse server config, PeerDB support files (`infra/peerdb/`)
-- **Secrets:** All passwords, connection strings
-- **Services:** ClusterIP for internal; LoadBalancer/Ingress for Grafana, PeerDB UI
+- **PersistentVolumeClaims:** ClickHouse data (500 GB)
+- **ConfigMaps:** ClickHouse server config (`infra/clickhouse/`), Debezium connector JSON, schema SQL
+- **Secrets:** ClickHouse + CDC passwords, Kafka credentials
+- **Services:** ClusterIP for ClickHouse + Kafka Connect REST
 
 ---
 
@@ -200,135 +176,73 @@ cce-analytics/
 
 ```mermaid
 flowchart TD
-    A["1. ClickHouse + MinIO/S3"] --> B["2. Run schema/01 (pre-create tables)"]
-    B --> PG["3. Configure PG replication (cdc/01-configure-replication.sql)"]
-    PG --> P["4. create-peers.sh (ccedb_peer + clickhouse_peer)"]
-    P --> C["5. register-connectors.sh (create mirror — uses existing tables)"]
-    C --> D["6. Wait for initial snapshot (check-connector-health.sh)"]
-    D --> E["7. Create MVs + Indexes + Dicts (schema/02-04)"]
-    E --> F["8. Backfill MVs with snapshot data"]
-    F --> I["9. Prometheus + Grafana"]
-    I --> J["10. Point cce-insights-service at ClickHouse (separate repo)"]
+    A["1. docker compose up (ClickHouse + Kafka Connect on cce-net)"] --> B["2. Apply ClickHouse schema (schema/01-06)"]
+    B --> PG["3. Configure PG replication (cdc/01-configure-replication.sql) on ccedb"]
+    PG --> C["4. register-connectors.sh (Debezium connector → initial snapshot)"]
+    C --> D["5. Verify (check-connector-health.sh + validate-clickhouse.sh)"]
+    D --> J["6. Point cce-insights-service at ClickHouse (separate repo)"]
 ```
 
-> **Source PostgreSQL (`ccedb`) is not part of this stack** — it is the existing CCE
-> operational database. Steps 3–5 target it remotely (host/credentials from `.env`).
-> In `docker-compose.yml`, the `./schema` directory is mounted into ClickHouse's
-> `docker-entrypoint-initdb.d`, so schema/01–04 run automatically on first boot; the
-> manual schema steps below are for production or re-runs.
+> **The platform stack comes first.** Kafka, `ccedb`, Prometheus/Grafana, and the insights apps
+> live in `openphc/deploy-scripts` on the external `cce-net` network — bring that up (or at least
+> `docker network create cce-net`) before `docker compose up` here. Step 3 targets `ccedb`
+> remotely (host/credentials from `.env`).
 
 ---
 
-## 6. PeerDB Mirror Setup
+## 6. Debezium Connector Setup
 
-Peers and the mirror are managed through PeerDB's **nexus SQL interface** on **port 9900**
-(`CREATE PEER` / `CREATE MIRROR`, applied with `psql`). The repo scripts wrap this and read
-all connection details from `.env`. They are **not** run automatically by `docker compose up` —
-run them after the stack is healthy.
-
-```bash
-set -a; source .env; set +a   # PG_*/CDC_*, CH_*, PEERDB_PASSWORD, etc.
-```
-
-### Step A — Create Peers
-
-`create-peers.sh` registers `ccedb_peer` (PostgreSQL source) and `clickhouse_peer`
-(ClickHouse destination) via the nexus:
+The Debezium PostgreSQL source connector is registered on the Kafka Connect worker via its
+REST API (`:8083`). `register-connectors.sh` interpolates `${CDC_*}` from `.env` into
+`connectors/debezium-postgres-source.json` and POSTs it. It is **not** run automatically by
+`docker compose up`.
 
 ```bash
-./scripts/create-peers.sh
-```
-
-> The ClickHouse peer uses the **native** port (9000), not the HTTP port (8123). S3/MinIO
-> staging creds come from the flow services' env, not the peer definition.
-
-### Step B — Create Mirror
-
-`register-connectors.sh` applies `connectors/peerdb-mirror.sql` (the `CREATE MIRROR`
-statement) to the nexus:
-
-```bash
+set -a; source .env; set +a   # CDC_PG_*, CDC_USER, CDC_PASSWORD, CONNECT_URL
 ./scripts/register-connectors.sh
 ```
 
-This creates `cce_analytics_mirror` with `do_initial_snapshot=true`, `soft_delete=true`,
-publication `cce_analytics_pub`, and slot `cce_analytics_slot`.
+This creates connector `cce-ccedb-source`: `snapshot.mode=initial`, publication `cce_analytics_pub`,
+slot `cce_analytics_slot`, JSON converters, `tombstones.on.delete=false`, and the **ReselectColumns**
+post-processor for TOAST. Debezium does the initial snapshot, then streams.
 
-### Verify Mirror Running & Monitor Snapshot
+### Verify connector + ingestion
 
 ```bash
-./scripts/check-connector-health.sh          # container health + nexus/flow-api probes + mirror presence
+./scripts/check-connector-health.sh   # connector state + task states + ClickHouse rows + consumer errors
 ```
 
-Per-table lag and rows-synced are best viewed in the **PeerDB UI** (http://localhost:3000)
-or **Temporal UI** (http://localhost:8085).
+Per-topic detail: `${CONNECT_URL}/connectors/cce-ccedb-source/status` and **kafka-ui** (topics `cce.public.*`).
 
 ---
 
 ## 7. Schema Deployment
 
-### Step 1 — Pre-create tables (BEFORE starting PeerDB mirror)
-
-Tables must exist before PeerDB begins replication. PeerDB uses existing tables and does not recreate them.
+Apply all schema files in order (idempotent). With Debezium + Kafka, **base tables and the
+Kafka-engine ingestion (schema/01–02) must exist before the connector starts** so the
+consumer MVs are ready to land the snapshot.
 
 ```bash
 CH_HOST=${CH_HOST:-localhost}
 CH_USER=${CH_USER:-cce_pipeline}
 CH_PASS=${CLICKHOUSE_PASSWORD:-cce_analytics_dev}
+CH="clickhouse-client --host $CH_HOST --user $CH_USER --password $CH_PASS --database cce_analytics --multiquery"
 
-# Creates all 9 base tables with ReplacingMergeTree(_peerdb_version, _peerdb_is_deleted)
-# Requires ClickHouse 23.2+ (clean_deleted_rows = 'Always')
-clickhouse-client --host "$CH_HOST" --user "$CH_USER" --password "$CH_PASS" \
-  --multiquery < schema/01-create-tables.sql
+$CH < schema/01-create-tables.sql          # 9 base tables — ReplacingMergeTree(_version, _is_deleted)
+$CH < schema/02-kafka-ingestion.sql        # Kafka-engine queue + consumer MV per table (needs the broker reachable)
+$CH < schema/03-create-materialized-views.sql
+$CH < schema/04-create-indexes.sql
+$CH < schema/05-create-dictionary.sql
+$CH < schema/06-current-state-rollups.sql  # argMaxState current-state rollups (recommended)
 ```
 
-### Step 2 — Create peers, start the mirror, and wait for snapshot
+> **Why current-state rollups (schema/06), not projections/count-MVs/refreshable MVs?**
+> Projections are skipped under `FINAL` (the `cce_pipeline` profile sets `final=1`); count-based
+> MVs on mutable tables double-count CDC UPDATEs; a refreshable MV would be stale.
+> `AggregatingMergeTree + argMaxState(col, _version)` dedups by version on read via `argMaxMerge()`
+> — incremental, correct, and live. Reports use a nested GROUP BY and filter `WHERE is_deleted = 0`.
 
-See [§6 PeerDB Mirror Setup](#6-peerdb-mirror-setup) for details.
-
-```bash
-set -a; source .env; set +a
-./scripts/create-peers.sh            # ccedb_peer + clickhouse_peer (nexus SQL @ :9900)
-./scripts/register-connectors.sh     # cce_analytics_mirror (initial snapshot)
-./scripts/check-connector-health.sh  # container health + mirror presence
-```
-
-### Step 3 — Create MVs, indexes, and dictionaries (AFTER snapshot completes)
-
-```bash
-# All scripts are idempotent
-clickhouse-client --host "$CH_HOST" --user "$CH_USER" --password "$CH_PASS" \
-  --database cce_analytics --multiquery < schema/02-create-materialized-views.sql
-
-clickhouse-client --host "$CH_HOST" --user "$CH_USER" --password "$CH_PASS" \
-  --database cce_analytics --multiquery < schema/03-create-indexes.sql
-
-clickhouse-client --host "$CH_HOST" --user "$CH_USER" --password "$CH_PASS" \
-  --database cce_analytics --multiquery < schema/04-create-dictionary.sql
-```
-
-### Step 4 — Current-state rollups (recommended)
-
-`schema/05-current-state-rollups.sql` adds `argMaxState` MVs that keep one current row per
-mutable entity — `rollup_protocol_instance_current`, `rollup_step_current`,
-`rollup_delivery_current` — to accelerate the hot current-state endpoints (compliance summary,
-outcome distribution, patient lists, rankings, hotspots, adaptor performance) **without `FINAL`**.
-They are **incremental and always fresh** (no staleness), and use no experimental features.
-
-```bash
-clickhouse-client --host "$CH_HOST" --user "$CH_USER" --password "$CH_PASS" \
-  --database cce_analytics --multiquery < schema/05-current-state-rollups.sql
-```
-
-> **Why this and not a projection, count-MV, or refreshable MV?** Projections are skipped under
-> `FINAL` (the `cce_pipeline` profile sets `final=1`); count-based MVs on mutable tables
-> double-count CDC UPDATEs; a refreshable MV would be stale between refreshes.
-> `AggregatingMergeTree + argMaxState(col, _peerdb_version)` dedups by version on read via
-> `argMaxMerge()` — incremental, correct, and live. Reports use a nested GROUP BY and must
-> filter `WHERE is_deleted = 0`; see the file header for query templates.
->
-> Trade-off: one extra MV write per CDC event on these tables (write amplification, mostly on
-> `step_instances`). Acceptable for fast, fresh current-state reads.
+Then register the Debezium connector (§6) to start the snapshot.
 
 ### Validate Schema
 ```bash
@@ -352,13 +266,11 @@ clickhouse-client --host "$CH_HOST" --user "$CH_USER" --password "$CH_PASS" \
 |-------|---------|----------|
 | ClickHouse alive | `curl -s http://localhost:8123/ping` | `Ok.` |
 | Tables exist | `clickhouse-client -q "SELECT count() FROM system.tables WHERE database='cce_analytics'"` | `>= 9` |
-| MVs exist | `clickhouse-client -q "SELECT count() FROM system.tables WHERE database='cce_analytics' AND engine LIKE '%View%'"` | `>= 14` |
-| Data flowing | `clickhouse-client -q "SELECT name, total_rows FROM system.tables WHERE database='cce_analytics' AND total_rows > 0"` | Tables with rows |
-| PeerDB stack + mirror | `./scripts/check-connector-health.sh` | `STACK HEALTHY` |
-| PeerDB nexus | `PGPASSWORD=$PEERDB_PASSWORD psql "host=localhost port=9900 user=peerdb dbname=peerdb" -c 'SELECT name FROM peers'` | lists `ccedb_peer`, `clickhouse_peer` |
-| PeerDB UI | `curl -s http://localhost:3000/api/health` (or browse) | reachable |
-| MinIO | `curl -s http://localhost:9001/minio/health/live` | `200` |
-| Grafana | `curl -s http://localhost:3001/api/health` | `{"database":"ok"}` |
+| MVs + consumer MVs exist | `clickhouse-client -q "SELECT count() FROM system.tables WHERE database='cce_analytics' AND engine='MaterializedView'"` | `>= 24` (12 aggregation + 9 consumer + 3 rollup) |
+| Kafka queues exist | `clickhouse-client -q "SELECT count() FROM system.tables WHERE database='cce_analytics' AND engine='Kafka'"` | `9` |
+| Data flowing | `clickhouse-client -q "SELECT count() FROM cce_analytics.inbound_event_logs"` | `> 0` after snapshot |
+| Debezium connector | `./scripts/check-connector-health.sh` | `HEALTHY` |
+| Connector status | `curl -s $CONNECT_URL/connectors/cce-ccedb-source/status \| jq .connector.state` | `RUNNING` |
 
 ---
 
@@ -376,7 +288,7 @@ clickhouse-client --host "$CH_HOST" --user "$CH_USER" --password "$CH_PASS" \
 
 ### PostgreSQL WAL / Replication Slot Monitoring
 
-PeerDB uses a logical replication slot (`cce_analytics_slot`) in PostgreSQL. If the slot becomes inactive or WAL accumulates beyond safe limits, CDC will stall and disk may fill.
+Debezium uses a logical replication slot (`cce_analytics_slot`) in PostgreSQL. If the slot becomes inactive or WAL accumulates beyond safe limits, CDC will stall and disk may fill.
 
 **Key queries:**
 
@@ -393,10 +305,10 @@ FROM pg_replication_slots WHERE slot_name = 'cce_analytics_slot';
 **Required PostgreSQL setting:**
 
 ```
-max_slot_wal_keep_size = 10GB   -- prevents unbounded WAL growth if PeerDB is down
+max_slot_wal_keep_size = 10GB   -- prevents unbounded WAL growth if Debezium/Connect is down
 ```
 
-> **Recovery**: If the slot is inactive and WAL exceeds the limit, PostgreSQL will invalidate the slot. PeerDB will fail to resume and requires a full re-snapshot via mirror resync. Monitor the `pg_wal_lsn_diff_bytes` metric and alert at 1 GB.
+> **Recovery**: If the slot is inactive and WAL exceeds the limit, PostgreSQL will invalidate the slot. Debezium will fail to resume and requires a full re-snapshot (./scripts/resnapshot-mirror.sh). Monitor the `pg_wal_lsn_diff_bytes` metric and alert at 1 GB.
 
 ### Alerts
 
@@ -404,7 +316,7 @@ Configured in `infra/grafana/provisioning/alerting/alerts.yaml`:
 
 | Alert | Condition | Severity |
 |-------|-----------|----------|
-| PeerDB Mirror Stalled | No new rows synced for 5min | Critical |
+| CDC Slot Inactive | `pg_replication_slots.active = false` for 2min | Critical |
 | CDC Source Slot Inactive | `pg_replication_slots.active = false` for 1min | Critical |
 | WAL Lag Excessive | `pg_wal_lsn_diff > 1 GB` for 5min | Warning |
 | ClickHouse Insert Stall | Zero inserts for 5min | Warning |
@@ -423,39 +335,38 @@ Configure in Grafana → Alerting → Contact Points:
 
 ### Full Re-snapshot
 
-If ClickHouse data is lost or needs full refresh, use the re-snapshot helper — it drops
-and recreates the mirror via the nexus SQL interface (`DROP MIRROR` → `register-connectors.sh`)
-and truncates the MV backing tables first to avoid double-counting:
+If ClickHouse data is lost or needs a full refresh, use the re-snapshot helper:
 
 ```bash
 set -a; source .env; set +a
 ./scripts/resnapshot-mirror.sh
 ```
 
-The script drops `cce_analytics_mirror`, truncates the `mv_*` backing tables, then recreates
-the mirror with `do_initial_snapshot=true`. Base tables (schema/01) stay in place — see
+It stops the connector, **resets its Kafka Connect offsets** (`DELETE /connectors/{name}/offsets`,
+Connect 3.6+), drops the replication slot, truncates the ClickHouse tables (base + MV backing +
+rollups), and resumes — yielding a fresh `snapshot.mode=initial` run. See
 [Recreating / Backfilling an MV Safely](#recreating--backfilling-an-mv-safely).
 
-### Partial Table Resync
+### Partial Table Re-snapshot
 
-PeerDB supports resyncing individual tables without dropping the entire mirror via the
-PeerDB UI (http://localhost:3000 → Mirrors → cce_analytics_mirror → Resync Table → select table).
+Use Debezium's **ad-hoc (incremental) snapshot** signal to re-snapshot specific tables without a
+full reset — configure a signaling table/topic and send a snapshot signal listing the tables
+(see the Debezium signaling docs).
 
 ---
 
 ## 11. Rollback Procedures
 
-### PeerDB Mirror Rollback
+### Debezium Connector Rollback
 ```bash
 set -a; source .env; set +a
 
-# Drop the mirror (via the nexus SQL interface), then recreate from the committed config
-PGPASSWORD="$PEERDB_PASSWORD" psql "host=localhost port=9900 user=peerdb dbname=peerdb" \
-  -c "DROP MIRROR IF EXISTS cce_analytics_mirror;"
+# Delete + re-register from the committed connector config
+curl -s -X DELETE "$CONNECT_URL/connectors/cce-ccedb-source"
 ./scripts/register-connectors.sh
 ```
 
-> Pause/resume of a running mirror is available in the PeerDB UI (http://localhost:3000).
+> Pause/resume without deleting: `PUT $CONNECT_URL/connectors/cce-ccedb-source/{pause,resume}`.
 
 ### ClickHouse Schema Rollback
 ```bash
@@ -495,16 +406,17 @@ clickhouse-client --query "
   GROUP BY table HAVING parts > 100 ORDER BY parts DESC"
 ```
 
-### PeerDB Mirror Management
+### Debezium Connector Management
 ```bash
-# Pause mirror (via PeerDB UI or SQL)
-# UI: Mirrors → cce_analytics_mirror → Pause
+# Pause / resume the connector
+curl -s -X PUT "$CONNECT_URL/connectors/cce-ccedb-source/pause"
+curl -s -X PUT "$CONNECT_URL/connectors/cce-ccedb-source/resume"
 
-# Resume mirror
-# UI: Mirrors → cce_analytics_mirror → Resume
+# Restart the connector (and its tasks)
+curl -s -X POST "$CONNECT_URL/connectors/cce-ccedb-source/restart?includeTasks=true"
 
-# Restart PeerDB server
-docker compose restart peerdb
+# Restart the Connect worker
+docker compose restart kafka-connect
 ```
 
 ### Materialized View Backfill
@@ -540,7 +452,7 @@ WHERE <source_conditions>;
 
 ### Recreating / Backfilling an MV Safely
 
-Each MV is **two objects** (see `schema/02-create-materialized-views.sql`):
+Each MV is **two objects** (see `schema/03-create-materialized-views.sql`):
 
 | Object | Example | Role |
 |--------|---------|------|
@@ -571,8 +483,8 @@ Safe procedures (pick one):
 
 | Approach | Steps | Tradeoff |
 |----------|-------|----------|
-| **MV-before-data** | Create the trigger *before* the base table receives rows (run schema/02 between schema/01 and the PeerDB mirror). Snapshot INSERTs populate the MV automatically — no backfill. | MV overhead (incl. `mv_deviation_by_patient` FINAL join) during the bulk snapshot load |
-| **Quiet-window backfill** | 1. Pause the PeerDB mirror (UI → Pause). 2. `TRUNCATE TABLE <backing_table>` if re-backfilling. 3. Run the backfill `INSERT`. 4. Resume the mirror. | Brief CDC lag while paused |
+| **MV-before-data** | Apply all schema (including aggregation MVs) **before** registering the Debezium connector. The snapshot INSERTs then populate the MVs automatically — no backfill. (This is the documented bootstrap order.) | MV overhead (incl. `mv_deviation_by_patient` FINAL join) during the bulk snapshot load |
+| **Quiet-window backfill** | 1. Pause the connector (`PUT .../pause`). 2. `TRUNCATE TABLE <backing_table>` if re-backfilling. 3. Run the backfill `INSERT`. 4. Resume (`PUT .../resume`). | Brief CDC lag while paused |
 
 > When re-backfilling an existing backing table, `TRUNCATE TABLE cce_analytics.<backing_table>` first — otherwise the backfill adds to the data already accumulated by the live trigger, compounding the double-count.
 
@@ -581,37 +493,38 @@ Safe procedures (pick one):
 | Component | Scaling Strategy |
 |-----------|-----------------|
 | ClickHouse | Add replicas (ReplicatedMergeTree), shard for > 1TB/day |
-| PeerDB | Increase `snapshot_max_parallel_workers`; scale `flow-worker`; dedicated catalog |
-| MinIO | Scale to distributed MinIO or switch to S3 for high snapshot throughput |
+| Debezium | Tune snapshot `max.queue.size`/`max.batch.size`; dedicated Connect worker |
+| Kafka Connect | Increase `tasks.max` / add Connect workers; tune `max.batch.size` |
 
 ---
 
 ## 13. Troubleshooting
 
-### PeerDB Mirror Not Starting
+### Connector Not Starting / FAILED
 ```bash
-# Check mirror status + lag
-./scripts/check-connector-health.sh
+# Connector + task state and the failure trace
+curl -s "$CONNECT_URL/connectors/cce-ccedb-source/status" | jq
 
-# Check PeerDB logs
-docker compose logs peerdb | grep -i error
+# Kafka Connect worker logs
+docker compose logs kafka-connect | grep -i error
 
 # Common fixes:
-# - Peers missing: re-run ./scripts/create-peers.sh (ccedb_peer / clickhouse_peer)
-# - PostgreSQL: verify wal_level=logical, replication slot exists, REPLICA IDENTITY FULL
+# - PostgreSQL: wal_level=logical, slot + publication exist, REPLICA IDENTITY FULL
 #   (./scripts/validate-cdc-config.sh <pg-host> <pg-port> <pg-user> ccedb)
-# - ClickHouse: verify database/user exists, native port 9000 reachable from PeerDB
+# - Connectivity: Kafka Connect can reach ccedb (CDC_PG_HOST) and the kafka broker on cce-net
+# - Re-register after fixing: ./scripts/register-connectors.sh
 ```
 
 ### Data Not Appearing in ClickHouse
 ```bash
-# Check mirror sync stats (rows synced, lag)
-./scripts/check-connector-health.sh
+# 1. Are events on the topics?  (kafka-ui → topics cce.public.*, or kafka-console-consumer)
+# 2. Connector running?
+curl -s "$CONNECT_URL/connectors/cce-ccedb-source/status" | jq .connector.state
 
-# Check ClickHouse insert errors
-clickhouse-client -q "SELECT * FROM system.query_log WHERE type='ExceptionWhileProcessing' ORDER BY event_time DESC LIMIT 5"
+# 3. Kafka-engine consumers erroring?  (broker unreachable from ClickHouse, parse errors)
+clickhouse-client -q "SELECT database, table, last_exception FROM system.kafka_consumers WHERE database='cce_analytics' AND last_exception != ''"
 
-# Verify table has data
+# 4. Rows landed?
 clickhouse-client -q "SELECT count() FROM cce_analytics.inbound_event_logs"
 ```
 

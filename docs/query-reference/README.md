@@ -11,10 +11,10 @@ definition of how each metric is computed, for the insights-service to reuse.
 ## Conventions
 
 - **Current-state counts** (status breakdowns, step states, delivery outcomes) — prefer the
-  always-fresh `argMaxState` **current-state rollups** in [`schema/05`](../../schema/05-current-state-rollups.sql):
+  always-fresh `argMaxState` **current-state rollups** in [`schema/06`](../../schema/06-current-state-rollups.sql):
   `rollup_protocol_instance_current`, `rollup_step_current`, `rollup_delivery_current`. Resolve
   the current value per entity with a nested `GROUP BY ... argMaxMerge(col)` and **always filter
-  `WHERE is_deleted = 0`** (templates in the schema/05 header). These avoid `FINAL` and never
+  `WHERE is_deleted = 0`** (templates in the schema/06 header). These avoid `FINAL` and never
   double-count. The `.sql` files below still show the equivalent `... FINAL` base-table form,
   which is correct too (just heavier) — never use the removed count-based MVs.
 - **Pre-aggregated trends/volumes** read the materialized-view backing tables

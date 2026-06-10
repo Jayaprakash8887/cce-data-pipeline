@@ -27,7 +27,7 @@ if [[ "$DB_EXISTS" != "1" ]]; then
 fi
 echo "✓ Database 'cce_analytics' exists"
 
-# Expected CDC base tables (pre-created via schema/01, populated by the PeerDB mirror)
+# Expected CDC base tables (created via schema/01, populated by the Kafka consumer MVs)
 EXPECTED_TABLES=(
     "protocol_instances"
     "step_instances"
@@ -105,6 +105,24 @@ for mv in "${EXPECTED_MV_TRIGGERS[@]}"; do
         echo "  ✓ ${mv}"
     else
         echo "  ✗ ${mv} MISSING"
+        MISSING=$((MISSING + 1))
+    fi
+done
+
+# Kafka-engine ingestion: one queue table + one consumer MV per source table (schema/02)
+INGEST=(
+    inbound_event_logs protocol_definitions protocol_instances step_instances deviations
+    compliance_event_logs action_definitions intelligence_event_logs intelligence_deliveries
+)
+echo ""
+echo "--- Kafka Ingestion (queue + consumer MV per table, ${#INGEST[@]} tables) ---"
+for t in "${INGEST[@]}"; do
+    Q=$(curl -sf "${CH_URL}/?query=SELECT+count()+FROM+system.tables+WHERE+database='cce_analytics'+AND+name='${t}_queue'+AND+engine='Kafka'" | tr -d '[:space:]')
+    M=$(curl -sf "${CH_URL}/?query=SELECT+count()+FROM+system.tables+WHERE+database='cce_analytics'+AND+name='${t}_mv'+AND+engine='MaterializedView'" | tr -d '[:space:]')
+    if [[ "$Q" == "1" && "$M" == "1" ]]; then
+        echo "  ✓ ${t}_queue + ${t}_mv"
+    else
+        echo "  ✗ ${t}: queue=${Q:-0} consumer_mv=${M:-0}"
         MISSING=$((MISSING + 1))
     fi
 done

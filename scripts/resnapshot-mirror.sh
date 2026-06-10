@@ -1,78 +1,72 @@
 #!/usr/bin/env bash
-# PeerDB Mirror Re-snapshot
-# Drops and recreates the mirror via the PeerDB nexus SQL interface (port 9900) to
-# force a full re-snapshot.
-# Use when: replication slot was dropped, ClickHouse data is corrupted/truncated,
-# or schema diverged beyond what ALTER TABLE can fix.
+# Debezium Connector Re-snapshot
+# Forces a fresh initial snapshot of the Debezium PostgreSQL connector by resetting its
+# Kafka Connect offsets (and the replication slot), then truncating the ClickHouse tables.
+# Use when: ClickHouse data is corrupted/truncated, or you need to rebuild from scratch.
 #
-# Usage: ./scripts/resnapshot-mirror.sh
+# Requires Kafka Connect 3.6+ (offset reset REST API) — cp-kafka 7.6.1 qualifies.
 #
-# WARNING: This re-snapshots all CDC tables from PostgreSQL. The initial snapshot
-# may take minutes to hours depending on data volume.
+# Usage:  set -a; source .env; set +a;  ./scripts/resnapshot-mirror.sh
+#
+# WARNING: re-snapshots all CDC tables from PostgreSQL — may take minutes to hours.
 
 set -euo pipefail
 
-PEERDB_HOST="${PEERDB_HOST:-localhost}"
-PEERDB_PORT="${PEERDB_PORT:-9900}"
-PEERDB_USER="${PEERDB_USER:-peerdb}"
-PEERDB_PASSWORD="${PEERDB_PASSWORD:-peerdb}"
-MIRROR_NAME="cce_analytics_mirror"
+CONNECT_URL="${CONNECT_URL:-http://localhost:8083}"
+NAME="cce-ccedb-source"
 
-nexus() {  # nexus <sql>
-    PGPASSWORD="$PEERDB_PASSWORD" psql \
-        "host=${PEERDB_HOST} port=${PEERDB_PORT} user=${PEERDB_USER} dbname=peerdb" \
-        -v ON_ERROR_STOP=1 -c "$1"
-}
-
-echo "=== PeerDB Mirror Re-snapshot ==="
-echo "Nexus:  ${PEERDB_HOST}:${PEERDB_PORT}"
-echo "Mirror: ${MIRROR_NAME}"
-echo ""
-echo "WARNING: This will DROP and RECREATE the mirror and run a full initial"
-echo "         snapshot from PostgreSQL."
-echo ""
-read -p "Continue? (y/N) " -n 1 -r
-echo
-if [[ ! $REPLY =~ ^[Yy]$ ]]; then
-    echo "Aborted."
-    exit 0
-fi
-echo ""
-
-# Step 1: Drop the existing mirror (tolerate "does not exist")
-echo "Step 1: Dropping mirror..."
-if OUT=$(nexus "DROP MIRROR IF EXISTS ${MIRROR_NAME};" 2>&1); then
-    echo "  ✓ Mirror dropped (or did not exist)"
-else
-    echo "$OUT" | sed 's/^/    /'
-    echo "  ✗ Failed to drop mirror"
-    exit 1
-fi
-sleep 2
-
-# Step 2: Truncate MV backing tables to avoid double-counting on re-snapshot.
-# The re-snapshot re-inserts every row, which re-fires the MV triggers; the mv_*
-# backing tables still hold their pre-resync aggregates and would double-count.
-echo "Step 2: Truncating MV backing tables (prevents double-count)..."
 CH_HOST="${CH_HOST:-localhost}"
 CH_USER="${CH_USER:-cce_pipeline}"
 CH_PASS="${CH_PASSWORD:-${CLICKHOUSE_PASSWORD:-cce_analytics_dev}}"
-if command -v clickhouse-client >/dev/null 2>&1; then
-    MVS=$(clickhouse-client --host "$CH_HOST" --user "$CH_USER" --password "$CH_PASS" -q \
-        "SELECT name FROM system.tables WHERE database='cce_analytics' AND name LIKE 'mv_%' AND engine NOT LIKE '%View%'" 2>/dev/null || true)
-    for t in $MVS; do
-        clickhouse-client --host "$CH_HOST" --user "$CH_USER" --password "$CH_PASS" \
-            -q "TRUNCATE TABLE cce_analytics.${t}" 2>/dev/null && echo "    ✓ truncated ${t}"
-    done
+CH_URL="http://${CH_HOST}:${CH_PORT:-8123}"
+
+# Source PG (to drop the replication slot) — optional but recommended for a clean snapshot.
+PG_HOST="${CDC_PG_HOST:-localhost}"; PG_PORT="${CDC_PG_PORT:-5432}"
+PG_DB="${CDC_PG_DATABASE:-ccedb}"; PG_SUPER="${PG_SUPERUSER:-postgres}"
+
+echo "=== Debezium Connector Re-snapshot ==="
+echo "Connect: ${CONNECT_URL}   Connector: ${NAME}"
+echo "WARNING: resets offsets, drops the replication slot, truncates ClickHouse tables,"
+echo "         and re-runs a full initial snapshot."
+read -p "Continue? (y/N) " -n 1 -r; echo
+[[ $REPLY =~ ^[Yy]$ ]] || { echo "Aborted."; exit 0; }
+echo ""
+
+# 1. Stop the connector, then reset its committed offsets (forces snapshot on resume).
+echo "Step 1: stop connector + reset offsets..."
+curl -sf -X PUT "${CONNECT_URL}/connectors/${NAME}/stop" >/dev/null 2>&1 || echo "  (connector not running / absent)"
+sleep 3
+if curl -sf -X DELETE "${CONNECT_URL}/connectors/${NAME}/offsets" >/dev/null 2>&1; then
+    echo "  ✓ offsets reset"
 else
-    echo "  (clickhouse-client not found — truncate mv_* backing tables manually before the snapshot lands)"
+    echo "  ⚠ offset reset failed (Kafka Connect < 3.6?) — delete + recreate the connector instead"
 fi
 
-# Step 3: Recreate the mirror (triggers full snapshot)
-echo "Step 3: Recreating mirror (do_initial_snapshot=true)..."
-./scripts/register-connectors.sh
+# 2. Drop the replication slot so Debezium recreates it from a fresh position.
+echo "Step 2: drop replication slot cce_analytics_slot (optional)..."
+if command -v psql >/dev/null 2>&1; then
+    PGPASSWORD="${PG_SUPERUSER_PASSWORD:-}" psql -h "$PG_HOST" -p "$PG_PORT" -U "$PG_SUPER" -d "$PG_DB" \
+        -c "SELECT pg_drop_replication_slot('cce_analytics_slot') WHERE EXISTS (SELECT 1 FROM pg_replication_slots WHERE slot_name='cce_analytics_slot');" \
+        >/dev/null 2>&1 && echo "  ✓ slot dropped (or absent)" || echo "  (could not drop slot — Debezium will reuse the existing one)"
+else
+    echo "  (psql not found — skipping slot drop)"
+fi
+
+# 3. Truncate ClickHouse tables (base + MV backing + rollups) so the re-snapshot doesn't double-count.
+echo "Step 3: truncate ClickHouse tables..."
+chq() { curl -sf "${CH_URL}/" --data-binary "$1" >/dev/null 2>&1; }
+if curl -sf "${CH_URL}/ping" >/dev/null 2>&1; then
+    TABLES=$(curl -sf "${CH_URL}/?query=SELECT+name+FROM+system.tables+WHERE+database='cce_analytics'+AND+(engine='ReplacingMergeTree'+OR+engine='SummingMergeTree'+OR+engine='AggregatingMergeTree')" 2>/dev/null || true)
+    for t in $TABLES; do chq "TRUNCATE TABLE cce_analytics.${t}" && echo "    ✓ ${t}"; done
+else
+    echo "  ✗ ClickHouse unreachable — truncate manually before resuming"
+fi
+
+# 4. Resume → fresh initial snapshot.
+echo "Step 4: resume connector (fresh initial snapshot)..."
+curl -sf -X PUT "${CONNECT_URL}/connectors/${NAME}/resume" >/dev/null 2>&1 && echo "  ✓ resumed" \
+    || { echo "  ⚠ resume failed — re-register: ./scripts/register-connectors.sh"; ./scripts/register-connectors.sh; }
 
 echo ""
 echo "=== Re-snapshot initiated ==="
 echo "Monitor: ./scripts/check-connector-health.sh"
-echo "See deployment-guide.md → 'Recreating / Backfilling an MV Safely'."

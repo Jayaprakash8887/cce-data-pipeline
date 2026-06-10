@@ -1,5 +1,5 @@
 -- CCE Data Pipeline — PostgreSQL CDC Configuration
--- Configure logical replication for PeerDB CDC
+-- Configure logical replication for Debezium CDC (pgoutput plugin)
 --
 -- Prerequisites:
 --   1. PostgreSQL must have wal_level = 'logical' (requires restart if changing)
@@ -19,11 +19,11 @@ BEGIN
     END IF;
 END $$;
 
--- Step 2: Set max_replication_slots (ensure enough for PeerDB + backup slots)
+-- Step 2: Set max_replication_slots (ensure enough for the Debezium slot + backup slots)
 ALTER SYSTEM SET max_replication_slots = 10;
 ALTER SYSTEM SET max_wal_senders = 10;
 
--- Prevent unbounded WAL growth if PeerDB falls behind
+-- Prevent unbounded WAL growth if Debezium/Connect falls behind
 ALTER SYSTEM SET max_slot_wal_keep_size = '10GB';
 
 -- Step 3: Create CDC user with minimal privileges
@@ -52,7 +52,8 @@ GRANT SELECT ON TABLE
 TO cce_cdc_user;
 
 -- Step 5: REPLICA IDENTITY FULL on all 9 tables
--- Required by PeerDB so UPDATE/DELETE events include the full old-row image.
+-- Required by Debezium so UPDATE/DELETE events include the full old-row image
+-- (and so ReselectColumns / TOAST reconstruction can recover unchanged large values).
 -- Without this, only the primary key is available in the WAL for changed rows.
 ALTER TABLE protocol_definition          REPLICA IDENTITY FULL;
 ALTER TABLE protocol_instance            REPLICA IDENTITY FULL;

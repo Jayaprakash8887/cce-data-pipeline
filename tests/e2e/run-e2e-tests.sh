@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# End-to-End Integration Test Suite for CCE Data Pipeline (PeerDB + ClickHouse)
-# Prerequisites: docker compose up -d (all services healthy), PeerDB mirror running
+# End-to-End Integration Test Suite for CCE Data Pipeline (Debezium + Kafka + ClickHouse)
+# Prerequisites: docker compose up -d, schema applied, Debezium connector registered
 # Usage: ./tests/e2e/run-e2e-tests.sh [clickhouse-host]
 
 set -euo pipefail
@@ -9,11 +9,9 @@ CH_HOST="${1:-localhost}"
 CH_PORT="${CH_PORT:-8123}"
 CH_DB="cce_analytics"
 
-# PeerDB nexus SQL interface (port 9900)
-PEERDB_HOST="${PEERDB_HOST:-localhost}"
-PEERDB_PORT="${PEERDB_PORT:-9900}"
-PEERDB_USER="${PEERDB_USER:-peerdb}"
-PEERDB_PASSWORD="${PEERDB_PASSWORD:-peerdb}"
+# Kafka Connect REST + Debezium connector
+CONNECT_URL="${CONNECT_URL:-http://localhost:8083}"
+CONNECTOR="cce-ccedb-source"
 
 PASS=0
 FAIL=0
@@ -34,8 +32,8 @@ ch_query() {
 
 # ============================================================
 echo "=== CCE Data Pipeline — E2E Test Suite ==="
-echo "ClickHouse:   ${CH_HOST}:${CH_PORT}"
-echo "PeerDB nexus: ${PEERDB_HOST}:${PEERDB_PORT}"
+echo "ClickHouse:    ${CH_HOST}:${CH_PORT}"
+echo "Kafka Connect: ${CONNECT_URL}"
 echo ""
 
 # ============================================================
@@ -48,11 +46,11 @@ else
     log_fail "ClickHouse is not responding"
 fi
 
-# PeerDB nexus (TCP probe on 9900)
-if timeout 3 bash -c ">/dev/tcp/${PEERDB_HOST}/${PEERDB_PORT}" 2>/dev/null; then
-    log_pass "PeerDB nexus is reachable (${PEERDB_HOST}:${PEERDB_PORT})"
+# Kafka Connect REST
+if curl -sf "${CONNECT_URL}/connectors" > /dev/null 2>&1; then
+    log_pass "Kafka Connect REST is reachable (${CONNECT_URL})"
 else
-    log_fail "PeerDB nexus is not responding at ${PEERDB_HOST}:${PEERDB_PORT}"
+    log_fail "Kafka Connect is not responding at ${CONNECT_URL}"
 fi
 
 # ============================================================
@@ -134,21 +132,22 @@ log_info "mv_event_volume_hourly today: ${HOURLY_TODAY:-0} events"
 
 # ============================================================
 echo ""
-echo "--- 5. PeerDB Mirror Status ---"
+echo "--- 5. Debezium Connector Status ---"
 
-if command -v psql >/dev/null 2>&1; then
-    MIRRORS=$(PGPASSWORD="$PEERDB_PASSWORD" psql \
-        "host=${PEERDB_HOST} port=${PEERDB_PORT} user=${PEERDB_USER} dbname=peerdb" \
-        -tAc "SELECT name FROM mirrors;" 2>/dev/null || echo "")
-    if echo "$MIRRORS" | grep -qw "cce_analytics_mirror"; then
-        log_pass "cce_analytics_mirror present in nexus"
+STATUS=$(curl -sf "${CONNECT_URL}/connectors/${CONNECTOR}/status" 2>/dev/null || echo '{}')
+if command -v jq >/dev/null 2>&1; then
+    STATE=$(echo "$STATUS" | jq -r '.connector.state // "ABSENT"')
+    if [[ "$STATE" == "RUNNING" ]]; then
+        log_pass "Debezium connector ${CONNECTOR} is RUNNING"
     else
-        log_fail "cce_analytics_mirror not found (mirrors: ${MIRRORS:-none})"
+        log_fail "connector ${CONNECTOR} state: ${STATE}"
     fi
-    log_info "Per-table lag/rows: PeerDB UI http://localhost:3000 · Temporal UI http://localhost:8085"
+    FAILED=$(echo "$STATUS" | jq '[.tasks[]? | select(.state != "RUNNING")] | length')
+    [[ "${FAILED:-0}" == "0" ]] && log_pass "all connector tasks RUNNING" || log_fail "${FAILED} task(s) not RUNNING"
 else
-    log_info "psql not installed — skipping nexus mirror check"
+    echo "$STATUS" | grep -q '"state":"RUNNING"' && log_pass "connector RUNNING" || log_fail "connector not RUNNING"
 fi
+log_info "Per-topic detail: kafka-ui (cce.public.*) · ${CONNECT_URL}/connectors/${CONNECTOR}/status"
 
 # ============================================================
 echo ""

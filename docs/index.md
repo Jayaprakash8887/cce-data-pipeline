@@ -2,7 +2,7 @@
 
 ## Overview
 
-The CCE Data Pipeline lands committed PostgreSQL data into ClickHouse via Change Data Capture (**PeerDB + ClickHouse**) — no Kafka, no custom stream processing. The `cce-insights-service` + `cce-insights-ui` apps (separate repos) consume ClickHouse to serve dashboards.
+The CCE Data Pipeline lands committed PostgreSQL data into ClickHouse via Change Data Capture (**Debezium + Kafka + ClickHouse**) — no custom stream processing. The `cce-insights-service` + `cce-insights-ui` apps (separate repos) consume ClickHouse to serve dashboards.
 
 **Core principle:** Analytics should be purely on committed data in the database.
 
@@ -24,7 +24,7 @@ The CCE Data Pipeline lands committed PostgreSQL data into ClickHouse via Change
 ### Data Path
 
 ```
-PostgreSQL (WAL) → PeerDB (direct replication) → ClickHouse (MVs + Dictionaries) → cce-insights-service / cce-insights-ui
+PostgreSQL (WAL) → Debezium → Kafka → ClickHouse (Kafka engine + MVs) → cce-insights-service / cce-insights-ui
 ```
 
 ### Reading Order

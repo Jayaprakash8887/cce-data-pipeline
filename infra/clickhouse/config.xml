@@ -22,7 +22,7 @@
         <asynchronous_metrics>true</asynchronous_metrics>
     </prometheus>
 
-    <!-- PeerDB handles its own batching; server-level async inserts with
+    <!-- Kafka-engine ingestion batches via kafka_max_block_size; server-level async inserts with
          wait_for_async_insert=0 risk data loss on crash with no throughput benefit. -->
     <async_insert>0</async_insert>
 </clickhouse>

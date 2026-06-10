@@ -12,10 +12,13 @@ graph TB
         PG["PostgreSQL 16<br/>(ccedb)"]
     end
 
+    subgraph Platform["Platform stack (cce-net, deploy-scripts)"]
+        KAFKA["Kafka<br/>(cp-kafka, KRaft)"]
+    end
+
     subgraph Pipeline["CCE Data Pipeline (this repo)"]
-        PEERDB["PeerDB<br/>(WAL Replication)"]
-        MINIO["MinIO / S3<br/>(Avro staging — mandatory)"]
-        CLICKHOUSE["ClickHouse<br/>(OLAP Analytics Store)"]
+        DBZ["Debezium<br/>(Kafka Connect)"]
+        CLICKHOUSE["ClickHouse<br/>(Kafka engine + OLAP store)"]
     end
 
     subgraph Presentation["Presentation (separate repos)"]
@@ -33,9 +36,9 @@ graph TB
     SCHEDULER --> PG
     INTELLIGENCE --> PG
 
-    PG -->|"CDC (WAL)"| PEERDB
-    PEERDB -->|"Avro stage"| MINIO
-    MINIO -->|"s3() load"| CLICKHOUSE
+    PG -->|"CDC (WAL, pgoutput)"| DBZ
+    DBZ -->|"change events (JSON)"| KAFKA
+    KAFKA -->|"Kafka engine"| CLICKHOUSE
     CLICKHOUSE -->|"SQL (HTTP/native)"| INSIGHTS
 
     INSIGHTS --> OPS
@@ -43,12 +46,14 @@ graph TB
     INSIGHTS --> ADMIN
 
     classDef existing fill:#7B8D8E,stroke:#566573,color:white
+    classDef platform fill:#E67E22,stroke:#B9770E,color:white
     classDef pipeline fill:#4A90D9,stroke:#2C5F8A,color:white
     classDef presentation fill:#9B59B6,stroke:#8E44AD,color:white
     classDef users fill:#27AE60,stroke:#1E8449,color:white
 
     class COLLECTOR,COMPLIANCE,SCHEDULER,INTELLIGENCE,PG existing
-    class PEERDB,MINIO,CLICKHOUSE pipeline
+    class KAFKA platform
+    class DBZ,CLICKHOUSE pipeline
     class INSIGHTS presentation
     class OPS,CLINICAL,ADMIN users
 ```
@@ -77,11 +82,10 @@ graph TB
 
 | Layer | Technology | Version | License | Purpose |
 |-------|-----------|---------|---------|---------|
-| Change Data Capture | PeerDB | stable-v0.36.26 | Apache 2.0 | WAL replication from PostgreSQL to ClickHouse (full OSS stack in docker-compose.yml) |
-| Object Storage | MinIO | latest | AGPL 3.0 | **Mandatory** S3-compatible Avro staging for the PeerDB→ClickHouse load (swappable to AWS S3) |
-| Analytics Database | ClickHouse | 26.3 LTS | Apache 2.0 | Columnar OLAP with MATERIALIZED columns + MVs; serving layer for insights-service |
-| Operational Monitoring | Grafana | 11.x | AGPL 3.0 | Infrastructure & pipeline health monitoring |
-| Metrics | Prometheus | 2.53 | Apache 2.0 | Metrics collection from services |
+| Change Data Capture | Debezium (on Kafka Connect) | `connect:3.0.0.Final` | Apache 2.0 | PostgreSQL source connector (pgoutput) → Kafka; ReselectColumns for TOAST |
+| Event bus | Kafka (cp-kafka, KRaft) | 7.6.1 | Apache 2.0 | **Reused** from the platform deploy; CDC change-event topics `cce.public.*` |
+| Analytics Database | ClickHouse | 26.3 LTS | Apache 2.0 | Consumes Kafka (Kafka engine) + columnar OLAP; serving layer for insights-service |
+| Monitoring | Prometheus + Grafana | — | — | **Reused** from the platform deploy (provisioning artifacts in `infra/`) |
 
 > **No stream processing layer.** ClickHouse MATERIALIZED columns handle field extraction at insert time. Materialized Views pre-aggregate. Zero custom application code in the pipeline.
 >
@@ -91,11 +95,10 @@ graph TB
 
 | Component | Minimum Version | Tested Version | Notes |
 |-----------|----------------|----------------|-------|
-| PeerDB | stable-v0.36.26 | stable-v0.36.26 | OSS self-hosted; pinned in docker-compose.yml + infra/peerdb/ |
-| ClickHouse | 23.2 | 26.3 LTS | 23.2+ for `clean_deleted_rows = 'Always'` (two-parameter ReplacingMergeTree) |
-| Grafana | 10.0 | 11.2 | With ClickHouse plugin |
-| PostgreSQL (source) | 14 | 16 | Existing CCE database (`ccedb`) |
-| Prometheus | 2.45 | 2.53 | Metrics collection |
+| Debezium | 2.4 (ReselectColumns) | 3.0.0.Final | On Kafka Connect; needs Kafka Connect 3.6+ for the offsets REST API |
+| Kafka | 3.5 | 7.6.1 (cp-kafka, KRaft) | Reused from the platform deploy |
+| ClickHouse | 23.2 | 26.3 LTS | 23.2+ for `clean_deleted_rows = 'Always'`; Kafka table engine built-in |
+| PostgreSQL (source) | 14 | 16 | Existing CCE database (`ccedb`); `wal_level=logical`, REPLICA IDENTITY FULL |
 
 ### 3.3 Technology Decisions
 
@@ -118,48 +121,51 @@ Metabase, Grafana). Rather than approximate them, the insights apps are repointe
 ClickHouse as their data source. This repo owns only the pipeline (CDC → ClickHouse);
 the apps own presentation and query ClickHouse via the `cce_pipeline` user.
 
-#### Why PeerDB (not Debezium + Kafka or ClickHouse MaterializedPostgreSQL)?
+#### Why Debezium + Kafka (not PeerDB)?
 
 | Alternative | Why Not |
 |-------------|--------|
-| **ClickHouse MaterializedPostgreSQL** | Experimental; TOAST values not replicated (our JSONB columns are 5-100 KB); no schema control (no custom ORDER BY, MATERIALIZED columns, CODEC); DDL changes require full re-snapshot; not supported in ClickHouse Cloud |
-| **Debezium + Kafka + ClickHouse Sink** | 3 components to operate (Debezium, Kafka, Sink Connector); requires Kafka cluster; higher operational complexity; slower initial snapshots (single-threaded) |
-| **PeerDB** | ✅ Single binary; native TOAST support; ~10 sec latency; parallelized initial load; schema evolution via replication messages; MATERIALIZED columns added post-creation via ALTER TABLE; simpler operations (no Kafka cluster) |
+| **PeerDB** | Point-to-point PG→ClickHouse; no multi-consumer fan-out; requires a 10-service stack + mandatory S3/MinIO staging; less natural fit once Kafka is already deployed |
+| **ClickHouse MaterializedPostgreSQL** | Experimental; TOAST values not replicated; no schema control; DDL changes require full re-snapshot |
+| **Debezium + Kafka** | ✅ Kafka is **already deployed** on the platform; future fan-out to other consumers (search, lake, ML) is a topic subscription; ClickHouse consumes Kafka directly (Kafka engine) → no sink connector, no S3 staging; durable replay buffer + DLQ |
 
-**Trade-offs accepted with PeerDB:**
-- No Kafka buffer — PeerDB stalling means WAL growth on PostgreSQL (mitigated by `max_slot_wal_keep_size=10GB` and WAL monitoring alerts)
-- No DLQ — replication errors require investigation at the PeerDB level
-- No multi-consumer CDC topics — other services cannot tap into a Kafka topic (acceptable: no downstream consumers needed)
-- Table ORDER BY determined by PostgreSQL primary keys (`id`) — mitigated by bloom-filter skip indexes on common filter columns (which work under `FINAL`)
+**Why this choice:** Kafka already runs on the platform (`cce-net`), and the product roadmap anticipates other consumers of the change stream, which a Kafka topic serves naturally. ClickHouse's Kafka table engine ingests the topics directly, so the only added component is a Kafka Connect worker for Debezium.
+
+**Trade-offs accepted with Debezium:**
+- **Unchanged-TOAST placeholder** — Debezium emits `__debezium_unavailable_value` for large JSONB not changed in an UPDATE; mitigated by **ReselectColumns** (re-reads those values from the source by PK) + `REPLICA IDENTITY FULL`. Without it our MATERIALIZED extractions on `raw_payload` would corrupt on status-transition updates.
+- **More moving parts** — Kafka Connect worker + connector config to operate (Kafka itself is shared/managed by the platform).
+- **Envelope parsing in ClickHouse** — consumer MVs parse the Debezium JSON envelope and derive `_version` (`source.lsn`) / `_is_deleted` (`op='d'`).
+- Table ORDER BY = PostgreSQL primary key (`id`) — mitigated by bloom-filter skip indexes (which work under `FINAL`).
 
 ---
 
 ## 4. Component Architecture
 
-### 4.1 CDC Layer (PeerDB)
+### 4.1 CDC Layer (Debezium → Kafka → ClickHouse)
 
-**PeerDB** connects directly to PostgreSQL's logical replication stream and loads ClickHouse via a **mandatory** S3/MinIO Avro staging step: `flow-worker` writes each CDC batch as Avro to the bucket, and ClickHouse pulls it in with the `s3()` function (there is no direct-insert path for the ClickHouse destination). All 11 ClickHouse tables are **pre-created** via `schema/01-create-tables.sql` with `ReplacingMergeTree(_peerdb_version, _peerdb_is_deleted)` and `SETTINGS clean_deleted_rows = 'Always'` before the PeerDB mirror is started. PeerDB writes into existing tables and does not recreate them. MATERIALIZED columns for JSON extraction are defined inline in the table DDL. For staging details and the AWS S3 swap, see [Data Flow § 2.3](data-flow.md#23-s3minio-staging).
+A **Debezium PostgreSQL source connector** (on a Kafka Connect worker, `pgoutput` plugin) reads `ccedb`'s WAL and publishes JSON change events to Kafka topics `cce.public.<table>`. **ClickHouse ingests Kafka directly**: per source table there is a Kafka-engine "queue" table and a consumer MV (`schema/02-kafka-ingestion.sql`) that parses the Debezium envelope and inserts the flat row into the `ReplacingMergeTree(_version, _is_deleted)` base table (`schema/01`). There is **no ClickHouse sink connector and no S3 staging**.
 
-All 9 CDC tables reside in the shared `ccedb` PostgreSQL database. A single PeerDB mirror replicates all tables (two large JSONB columns are excluded, and the unused `receiver_adaptor`/`destination_adaptor_mapping` tables are not mirrored). For the full table listing, mirror config, and schema details, see [Data Flow & Schema Design](data-flow.md).
+All 9 CDC tables reside in the shared `ccedb` database. The connector excludes two large unused JSONB columns and does not capture `receiver_adaptor`/`destination_adaptor_mapping`. For the full table listing, connector config, and the envelope-parsing details, see [Data Flow & Schema Design](data-flow.md).
 
-**PeerDB metadata columns** (added automatically to all tables):
-- `_peerdb_synced_at` — timestamp of sync to ClickHouse
-- `_peerdb_is_deleted` — soft-delete marker (true = row deleted in PostgreSQL)
-- `_peerdb_version` — version for ReplacingMergeTree deduplication
+**CDC-metadata columns** (derived by the consumer MV from the Debezium envelope):
+- `_version` — Debezium `source.lsn` (monotonic WAL position) → ReplacingMergeTree dedup version
+- `_is_deleted` — `1` when `op='d'` (PostgreSQL DELETE); `clean_deleted_rows='Always'` purges these on merge
+
+**TOAST handling:** the connector's **ReselectColumns** post-processor re-reads unchanged large JSONB (e.g. `raw_payload`) from the source by PK, so it never arrives as the `__debezium_unavailable_value` placeholder — keeping the MATERIALIZED extractions correct on status-transition UPDATEs.
 
 ### 4.2 Analytics Storage Layer (ClickHouse)
 
 **Key features leveraged:**
-- **ReplacingMergeTree (two-parameter)** — `ReplacingMergeTree(_peerdb_version, _peerdb_is_deleted)` with `clean_deleted_rows = 'Always'`: deduplicates by version, physically removes soft-deleted rows on merge
+- **Kafka table engine** — consumes the Debezium topics directly; consumer MVs parse the envelope into base tables (no sink connector)
+- **ReplacingMergeTree(_version, _is_deleted)** — `clean_deleted_rows = 'Always'`: dedup by `_version` (`source.lsn`), physically removes deletes on merge
 - **MATERIALIZED columns** — Extract JSON fields from `raw_payload` at insert time (zero query cost), defined inline in table DDL
-- **Materialized Views** — Real-time pre-aggregation triggered on INSERT (12 MVs on append-only sources); mutable entities queried via `FINAL` on base tables
-- **AggregatingMergeTree** — Correct incremental aggregation with `-State`/`-Merge` combinators (event logs, deviations — append-only sources only)
+- **Materialized Views** — 12 aggregation MVs on append-only sources; mutable entities served by the `argMaxState` current-state rollups or `FINAL`
+- **AggregatingMergeTree** — incremental aggregation with `-State`/`-Merge` (append-only sources) and `argMaxState` current-state rollups (mutable entities)
 - **SummingMergeTree** — Simple additive rollups (counts per hour/day)
 - **Dictionaries** — Fast key-value lookups replacing JOINs (3 dictionaries, all using `QUERY...FINAL` sources)
 - **Bloom filter indexes** — 17 secondary indexes for fast point lookups on non-ORDER-BY columns (effective under `FINAL`)
-- **CODEC compression** — LZ4/ZSTD for 10-40x compression on event data
-- **TTL** — 90-day hot retention on 4 high-volume log tables (inbound_event_logs, intelligence_event_logs, intelligence_deliveries, compliance_event_logs)
-- **User profiles** — `analytics` (readonly, `final=1` auto-applied) for `cce-insights-service`; `peerdb_writer` (write access, no FINAL overhead) for PeerDB CDC writes
+- **TTL** — 90-day hot retention on 4 high-volume log tables
+- **User profile** — `analytics` (readonly, `final=1` auto-applied) for `cce-insights-service` reads
 
 For full schema DDL, MV catalog, Entity × Behavior coverage matrix, and query patterns, see [Data Flow & Schema Design](data-flow.md).
 
@@ -178,15 +184,15 @@ Per-domain ClickHouse SQL the service can reuse is in [Query Reference](query-re
 
 ### 4.4 Operational Monitoring (Grafana + Prometheus)
 
-**Grafana** monitors the health of the data pipeline itself (not clinical analytics):
-- PeerDB mirror health (throughput, errors, replication lag)
-- ClickHouse insert rate and query performance (p95, p99)
-- End-to-end latency (PostgreSQL commit → ClickHouse insert)
-- PostgreSQL WAL replication slot lag
+The platform's **Grafana + Prometheus** (on `cce-net`) monitor pipeline health (this repo ships
+provisioning artifacts in `infra/` to add there):
+- Debezium connector state + lag (Kafka Connect metrics / `connectors/<name>/status`)
+- ClickHouse insert rate, Kafka-engine consumer errors, query performance
+- CDC freshness (age of latest event in ClickHouse) and PostgreSQL replication-slot lag
 
-**Prometheus** scrapes metrics from ClickHouse (port 9363). PeerDB (stable-v0.36.26) exports
-telemetry via OpenTelemetry rather than a built-in Prometheus endpoint — wire an OTel collector
-to scrape it (the `peerdb` scrape job in `infra/prometheus/prometheus.yml` is left disabled).
+**Prometheus** scrapes ClickHouse (port 9363). Kafka Connect exposes JMX/Prometheus metrics for
+Debezium; the Grafana alerts use the PostgreSQL replication-slot signal + ClickHouse freshness
+(see `infra/grafana/provisioning/alerting/alerts.yaml`).
 
 ---
 
@@ -194,9 +200,9 @@ to scrape it (the `peerdb` scrape job in `infra/prometheus/prometheus.yml` is le
 
 ```mermaid
 flowchart TD
-    PG["PostgreSQL (existing)"] -->|"Logical replication (WAL)"| PEERDB["PeerDB (flow-worker)"]
-    PEERDB -->|"writes Avro"| MINIO["MinIO / S3<br/>(Avro staging — mandatory)"]
-    MINIO -->|"s3() load"| CLICKHOUSE["ClickHouse"]
+    PG["PostgreSQL (existing)"] -->|"Logical replication (WAL)"| DBZ["Debezium (Kafka Connect)"]
+    DBZ -->|"change events"| KAFKA["Kafka (platform)"]
+    KAFKA -->|"Kafka engine"| CLICKHOUSE["ClickHouse"]
 
     CLICKHOUSE -->|"SQL"| INSIGHTS["cce-insights-service / ui (external)"]
     CLICKHOUSE --> GRAFANA["Grafana"]
@@ -205,8 +211,8 @@ flowchart TD
     CLICKHOUSE -.->|"metrics"| PROMETHEUS
 
     style PG fill:#27AE60,stroke:#1E8449,color:white
-    style PEERDB fill:#4A90D9,stroke:#2C5F8A,color:white
-    style MINIO fill:#4A90D9,stroke:#2C5F8A,color:white
+    style DBZ fill:#4A90D9,stroke:#2C5F8A,color:white
+    style KAFKA fill:#E67E22,stroke:#B9770E,color:white
     style CLICKHOUSE fill:#4A90D9,stroke:#2C5F8A,color:white
     style INSIGHTS fill:#9B59B6,stroke:#8E44AD,color:white
     style GRAFANA fill:#9B59B6,stroke:#8E44AD,color:white
@@ -222,13 +228,13 @@ flowchart TD
 | **Event Volume** | Events by resource type, facility, source, practitioner | `inbound_event_logs` → `mv_event_volume_hourly/daily` |
 | **Facility Ranking** | Event volume, unique patients, unique practitioners per facility | `inbound_event_logs` → `mv_facility_summary` |
 | **Practitioner Activity** | Events per practitioner, patient coverage, resource types | `inbound_event_logs` → `mv_practitioner_summary` |
-| **Compliance** | Adherence rate, on-track/at-risk/non-compliant counts | `rollup_protocol_instance_current` + `rollup_step_current` (argMaxState, schema/05) — or base tables with `FINAL` |
+| **Compliance** | Adherence rate, on-track/at-risk/non-compliant counts | `rollup_protocol_instance_current` + `rollup_step_current` (argMaxState, schema/06) — or base tables with `FINAL` |
 | **Deviations** | Overdue/missed counts, trends, by protocol/patient | `deviations` → `mv_deviation_trends`, `mv_deviation_by_protocol`, `mv_deviation_by_patient` |
 | **Ingestion Quality** | Acceptance rate, rejection reasons, source quality | `inbound_event_logs` → `mv_ingestion_quality` |
 | **Intelligence & Triggers** | Trigger volume by action type, destination, reason | `intelligence_event_logs` → `mv_intelligence_summary`, `mv_intelligence_by_patient/protocol` |
 | **Delivery Performance** | Success rate, latency, errors per adaptor/protocol | `intelligence_deliveries FINAL` (base table, ReplacingMergeTree) |
 | **Step/Scheduler** | Step states, completions, protocol progress | `step_instances FINAL` (base table, ReplacingMergeTree) |
-| **Pipeline Health** | CDC lag, mirror status | PeerDB metrics + Grafana |
+| **Pipeline Health** | Connector state, CDC freshness, slot lag | Kafka Connect + ClickHouse metrics + Grafana |
 
 ---
 
@@ -261,31 +267,29 @@ flowchart TD
 
 #### Development / Staging
 
+Only the components **this repo deploys** are listed (Kafka, Postgres, Prometheus/Grafana, and
+the insights apps are provided by the platform stack).
+
 | Component | Containers | CPU | RAM | Storage |
 |-----------|-----------|-----|-----|---------|
-| PeerDB (full stack: catalog, temporal, flow-api, 2 workers, nexus, ui) | 8 | 2 cores | 3 GB | 5 GB |
-| MinIO | 1 | 0.5 core | 512 MB | 20 GB |
+| Kafka Connect (Debezium) | 1 | 1 core | 1 GB | — |
 | ClickHouse | 1 | 4 cores | 16 GB | 100 GB SSD |
-| Prometheus | 1 | 0.5 core | 1 GB | 10 GB |
-| Grafana | 1 | 0.5 core | 512 MB | — |
-| **Total** | **12** | **~7 cores** | **21 GB** | **135 GB** |
+| **Total (this repo)** | **2** | **~5 cores** | **17 GB** | **100 GB** |
 
-> Presentation (`cce-insights-service` / `cce-insights-ui`) is sized and deployed separately.
+> Kafka, PostgreSQL, Prometheus/Grafana, and presentation (`cce-insights-service`/`ui`) are
+> sized/deployed by the platform stack, not here.
 
 #### Production (600k events/day)
 
 | Component | Containers | CPU | RAM | Storage |
 |-----------|-----------|-----|-----|---------|
-| PeerDB (full stack) | 8 | 3 cores | 6 GB | 20 GB |
-| MinIO | 1 | 1 core | 1 GB | 100 GB |
+| Kafka Connect (Debezium) | 1 | 2 cores | 2 GB | — |
 | ClickHouse | 1 | 8 cores | 32 GB | 500 GB SSD |
-| Prometheus | 1 | 2 cores | 4 GB | 50 GB |
-| Grafana | 1 | 1 core | 1 GB | — |
-| **Total** | **12** | **~15 cores** | **44 GB** | **670 GB** |
+| **Total (this repo)** | **2** | **~10 cores** | **34 GB** | **500 GB** |
 
-> Presentation (`cce-insights-service` / `cce-insights-ui`) is sized and deployed separately.
->
-> **Scale-out path:** ClickHouse supports sharding + replication for horizontal scaling. At 600k events/day, a single node is more than sufficient. Scale to a cluster when daily volume exceeds 10M events.
+> **Scale-out path:** ClickHouse supports sharding + replication for horizontal scaling. At 600k
+> events/day, a single node is more than sufficient. Scale to a cluster when daily volume exceeds
+> 10M events. Debezium throughput scales with `tasks.max` / Connect workers.
 
 ---
 
@@ -293,12 +297,12 @@ flowchart TD
 
 | Concern | Mechanism |
 |---------|-----------|
-| **Network isolation** | Data pipeline in dedicated network segment; PeerDB access via internal network only |
-| **Authentication** | ClickHouse: native user/password (`cce_pipeline` read-only); PeerDB nexus: `PEERDB_PASSWORD`; end-user auth handled by `cce-insights-service` (e.g. Keycloak) |
+| **Network isolation** | Components on the shared `cce-net`; Kafka Connect REST + ClickHouse internal-only |
+| **Authentication** | ClickHouse: native user/password (`cce_pipeline` read-only); Debezium uses the `cce_cdc_user` PG role; end-user auth handled by `cce-insights-service` (e.g. Keycloak) |
 | **Authorization** | ClickHouse readonly profile for the serving user; facility/program/role scoping enforced in `cce-insights-service` |
-| **Data in transit** | TLS for all inter-component communication (ClickHouse TLS, PeerDB TLS) |
+| **Data in transit** | TLS for inter-component communication (ClickHouse TLS, Kafka TLS/SASL as configured on the platform) |
 | **Data at rest** | ClickHouse disk encryption; sensitive fields accessible only to authorized roles |
-| **Audit** | ClickHouse query log; PeerDB mirror status and sync history |
+| **Audit** | ClickHouse query log; Kafka Connect status/offsets; Kafka topic retention |
 | **PII handling** | Patient UPIDs are pseudonymized identifiers (not names); FHIR resources stored for operational analytics only |
 
 ---
@@ -307,10 +311,11 @@ flowchart TD
 
 | Failure | Impact | Recovery |
 |---------|--------|----------|
-| ClickHouse down | insights-service queries fail; PeerDB buffers pending rows | PeerDB retries on recovery; WAL retained by replication slot |
-| PeerDB failure | CDC tables go stale; WAL grows on PostgreSQL | PeerDB auto-resumes from replication slot; `max_slot_wal_keep_size=10GB` prevents unbounded growth |
+| ClickHouse down | Kafka-engine consumers stop; events buffer in Kafka topics (retention) | Restart ClickHouse; consumers resume from committed Kafka offsets |
+| Debezium / Kafka Connect down | CDC stops; WAL grows on PostgreSQL | Connect restarts and resumes from the replication slot; `max_slot_wal_keep_size=10GB` caps WAL growth |
+| Kafka down (platform) | No new change events; slot holds WAL | Resolve on the platform; Debezium + ClickHouse resume from offsets |
 | insights-service/ui down | Dashboards unavailable (external app) | No pipeline/data impact; handled in that deployment |
-| PostgreSQL replication slot dropped | Full re-snapshot required | Recreate mirror via `connectors/peerdb-mirror.sql`; PeerDB performs parallelized initial load |
+| PostgreSQL replication slot dropped | Full re-snapshot required | `./scripts/resnapshot-mirror.sh` (reset offsets + drop slot + truncate + resume) |
 
 **Key invariant:** The data pipeline is a **read-only observer**. Its failure never impacts CCE operational services.
 
@@ -319,12 +324,12 @@ flowchart TD
 | Component | Strategy | RPO | RTO |
 |-----------|----------|-----|-----|
 | ClickHouse | Daily backup to object storage (`clickhouse-backup`) | 24 hours | 1 hour |
-| PeerDB | Catalog DB (`pgdata`) backed up; WAL slot preserves replay position | 0 (resume from slot) | 5 min |
+| Debezium/Kafka | Connect offsets + Kafka topic retention preserve replay; replication slot holds WAL position | 0 (resume from offset/slot) | 5 min |
 
 ### Upgrades
 
 - **ClickHouse:** Rolling restart for minor versions; backup before major versions
-- **PeerDB:** Bump image tags (all `:stable-vX`) and re-sync `infra/peerdb/`; mirror resumes from the replication slot automatically
+- **Debezium/Connect:** bump the `quay.io/debezium/connect` tag; the connector resumes from its Kafka offset / replication slot automatically
 
 ---
 
@@ -332,7 +337,7 @@ flowchart TD
 
 | Phase | Duration | Activities |
 |-------|----------|------------|
-| **Phase 1: Foundation** | 2 weeks | Deploy ClickHouse, PeerDB, create mirror, CDC tables |
+| **Phase 1: Foundation** | 2 weeks | Deploy ClickHouse + Kafka Connect; apply schema; register Debezium connector |
 | **Phase 2: Materialized Views** | 1 week | Configure MVs for all analytics domains |
 | **Phase 3: Insights repoint** | 2 weeks | Repoint `cce-insights-service` queries from the old backend to ClickHouse |
 | **Phase 4: Validation** | 1 week | Run parallel with the existing backend; validate data accuracy |
@@ -350,8 +355,8 @@ The pipeline is designed for forward-compatible evolution without downtime:
 |--------|--------|-----------------|
 | New FHIR field needed in analytics | None (raw_payload preserved) | `ALTER TABLE ADD COLUMN ... MATERIALIZED` on `inbound_event_logs` |
 | New FHIR resource type | Auto-captured (LowCardinality String) | Update `cce-insights-service` filters |
-| PostgreSQL table gains a column | PeerDB auto-captures via replication messages | `ALTER TABLE ADD COLUMN` on ClickHouse side |
-| PostgreSQL table dropped/renamed | PeerDB mirror errors on missing table | Update mirror `TABLE MAPPING` in `connectors/peerdb-mirror.sql` |
-| New PostgreSQL table needed | Add CDC capture | Add table to mirror mapping + create ClickHouse table + optional MV |
+| PostgreSQL table gains a column | Debezium captures it in the envelope | `ALTER TABLE ADD COLUMN` on ClickHouse + extend the consumer MV in schema/02 |
+| PostgreSQL table dropped/renamed | Connector errors on missing table | Update `table.include.list` in `connectors/debezium-postgres-source.json` |
+| New PostgreSQL table needed | Add CDC capture | Add to `table.include.list` + base table (schema/01) + queue/consumer MV (schema/02) |
 
 **Key invariant:** The `raw_payload` column in `inbound_event_logs` stores the full CloudEvent (including FHIR resource) as-is. Any new field extraction is a non-breaking addition — historical data can always be backfilled from `raw_payload` using ClickHouse's JSON functions.

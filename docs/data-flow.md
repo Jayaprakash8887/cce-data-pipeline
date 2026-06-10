@@ -2,7 +2,7 @@
 
 ## 1. Architecture Overview
 
-The CCE Data Pipeline uses a **CDC-only** architecture. All data flows from committed PostgreSQL records via Change Data Capture — no Kafka, no custom stream processing.
+The CCE Data Pipeline uses a **CDC-only** architecture: committed PostgreSQL records flow via Debezium to Kafka, and ClickHouse consumes the Kafka topics directly (Kafka table engine). No custom stream processing.
 
 ```mermaid
 flowchart LR
@@ -11,31 +11,34 @@ flowchart LR
     end
 
     subgraph CDC
-        PEER["PeerDB<br/>(flow-worker)"]
-        MINIO["MinIO / S3<br/>(Avro staging — mandatory)"]
+        DBZ["Debezium<br/>(Kafka Connect)"]
+        KAFKA["Kafka topics<br/>cce.public.*"]
     end
 
     subgraph Analytics
-        CH["ClickHouse<br/>(ReplacingMergeTree)"]
-        MV["Materialized Views<br/>(Pre-aggregation)"]
+        Q["Kafka-engine<br/>queue tables"]
+        CMV["Consumer MVs<br/>(parse envelope)"]
+        CH["ClickHouse base tables<br/>ReplacingMergeTree(_version,_is_deleted)"]
+        MV["Aggregation MVs / rollups"]
     end
 
     subgraph Presentation["Presentation (separate repos)"]
         SVC["cce-insights-service / cce-insights-ui"]
     end
 
-    PG -->|WAL| PEER
-    PEER -->|"writes Avro batches"| MINIO
-    MINIO -->|"ClickHouse s3() load"| CH
+    PG -->|"WAL (pgoutput)"| DBZ
+    DBZ -->|"change events (JSON)"| KAFKA
+    KAFKA --> Q
+    Q --> CMV
+    CMV -->|INSERT| CH
     CH -->|INSERT triggers| MV
     CH --> SVC
     MV --> SVC
 ```
 
-> **MinIO is required, not optional.** PeerDB's ClickHouse connector does not stream rows
-> directly — `flow-worker` stages each CDC batch as Avro files in an S3-compatible bucket,
-> then ClickHouse pulls them via the `s3()` table function. MinIO provides that bucket
-> (swappable for AWS S3). See [§2.3 S3/MinIO Staging](#23-s3minio-staging).
+> **ClickHouse consumes Kafka directly.** Per source table there is a Kafka-engine queue table
+> and a consumer MV that parses the Debezium envelope (`op` / `after` / `source.lsn`) into the
+> base table. No ClickHouse sink connector and no S3/MinIO staging. See [§2.3 Kafka Ingestion](#23-kafka-ingestion).
 
 **Core principle:** Analytics should be purely on committed data in the database. This ensures:
 - No discrepancies from in-flight events that may be rejected
@@ -46,16 +49,17 @@ flowchart LR
 
 ## 2. CDC Pipeline
 
-### 2.1 PeerDB Mirror (PostgreSQL → ClickHouse)
+### 2.1 Debezium Source Connector (PostgreSQL → Kafka)
 
-PeerDB reads the PostgreSQL Write-Ahead Log (WAL) via logical replication and loads ClickHouse through a mandatory **S3/MinIO Avro staging** step (see §2.3).
+A Debezium PostgreSQL connector on Kafka Connect reads the WAL via logical replication (`pgoutput`) and publishes one JSON change-event topic per table (`cce.public.<table>`).
 
-**Configuration** (see `connectors/peerdb-mirror.sql`):
-- Replication slot: `cce_analytics_slot`
-- Publication: `cce_analytics_pub`
-- Sync interval: 10 seconds
-- Soft delete: enabled (`_peerdb_is_deleted` column)
-- Initial snapshot: parallelized (4 tables, 8 workers)
+**Configuration** (see `connectors/debezium-postgres-source.json`):
+- Replication slot: `cce_analytics_slot` · Publication: `cce_analytics_pub`
+- Topic prefix: `cce` · Snapshot mode: `initial`
+- Converters: JSON, schemas disabled (no Schema Registry)
+- `tombstones.on.delete=false` (deletes carried as `op='d'`)
+- **ReselectColumns** post-processor re-reads unchanged large JSONB (`raw_payload`, `definition`) from the source so they never arrive as the `__debezium_unavailable_value` placeholder
+- Excluded columns: `intelligence_event_log.event_payload`, `intelligence_delivery.fhir_payload`
 
 **Source Tables (all from shared `ccedb` database):**
 
@@ -77,38 +81,37 @@ PeerDB reads the PostgreSQL Write-Ahead Log (WAL) via logical replication and lo
 
 ### 2.2 Deduplication & Delete Handling
 
-All 11 ClickHouse tables are **pre-created** via `schema/01-create-tables.sql` before the PeerDB mirror starts. PeerDB writes into the existing tables without recreating them.
+The 9 base tables are pre-created via `schema/01-create-tables.sql`; the consumer MVs
+(`schema/02`) insert into them.
 
-**Engine:** `ReplacingMergeTree(_peerdb_version, _peerdb_is_deleted)` with `SETTINGS clean_deleted_rows = 'Always'` (requires ClickHouse 23.2+).
+**Engine:** `ReplacingMergeTree(_version, _is_deleted)` with `SETTINGS clean_deleted_rows = 'Always'` (ClickHouse 23.2+).
 
 **Deduplication strategy:**
-- `_peerdb_version` increases monotonically per row
-- The two-parameter form deduplicates on the ORDER BY key, keeping the highest version row. If the winning row has `_peerdb_is_deleted=1`, it is physically removed during background merges.
-- Background merges collapse duplicates asynchronously
-- **Queries MUST use `FINAL`** or subqueries with `argMax()` when exact deduplication is needed before merges complete
+- `_version` = Debezium `source.lsn` (monotonic WAL position), derived per row by the consumer MV
+- ReplacingMergeTree keeps the highest-`_version` row per ORDER BY key (`id`); a winning row with `_is_deleted=1` is physically removed during background merges
+- **Queries use `FINAL`** (or the `argMaxState` rollups) when exact dedup is needed before merges complete
 
 **Delete handling:**
-- PeerDB sets `_peerdb_is_deleted=1` (soft-delete flag) for PostgreSQL DELETEs (`soft_delete=true` in mirror config)
-- `clean_deleted_rows = 'Always'` physically removes deleted rows during background merges — no `WHERE _peerdb_is_deleted = false` filter needed in queries
-- The `cce_pipeline` user profile has `final=1` so all reads from `cce-insights-service` (and ad-hoc queries) automatically apply FINAL
+- The consumer MV sets `_is_deleted=1` when the Debezium `op='d'` (it reads the `before` image for the key columns)
+- `clean_deleted_rows = 'Always'` physically removes deleted rows on merge — no `WHERE _is_deleted = 0` filter needed for base-table `FINAL` reads (the `argMaxState` rollups do carry an explicit `is_deleted` guard)
+- The `cce_pipeline` user profile has `final=1` so reads automatically apply FINAL
 
-### 2.3 S3/MinIO Staging
+### 2.3 Kafka Ingestion
 
-PeerDB's ClickHouse destination is **not** a direct row stream — it is a stage-and-load
-pipeline that **requires** an S3-compatible object store:
+ClickHouse consumes the Debezium topics **directly** — no sink connector. For each source table
+(`schema/02-kafka-ingestion.sql`):
 
-1. `flow-worker` serializes each CDC batch (and the initial snapshot) to **Avro** files.
-2. It uploads those files to the staging bucket (`peerdbbucket`).
-3. ClickHouse reads them back with the `s3()` table function and inserts into the target table.
+1. **`<table>_queue`** — a Kafka-engine table reading `cce.public.<table>` as one raw JSON String
+   per message (`kafka_format = 'JSONAsString'`).
+2. **`<table>_mv`** — a consumer MV that parses the Debezium envelope and inserts the flat row
+   into the base table:
+   - `op = JSONExtractString(raw,'op')`; `payload = after` (or `before` for deletes)
+   - `_version = source.lsn`; `_is_deleted = (op='d')`; `WHERE op IN ('c','u','r','d')`
 
-Implications:
-- **The object store is mandatory** for this pipeline; without it the mirror cannot load ClickHouse.
-- The endpoint (`http://minio:9000` in compose) must be reachable by **both** `flow-worker`
-  (writes) **and** ClickHouse (reads). On the shared Docker network both use the `minio` service name.
-- Configured via `PEERDB_CLICKHOUSE_AWS_CREDENTIALS_AWS_*` on the flow services
-  (endpoint, access key, secret, region, bucket).
-- **MinIO ↔ AWS S3 is an env swap**, not a topology change: point those vars at AWS, set
-  `AWS_*`, drop the `minio` service. See [Deployment Guide § MinIO vs S3](deployment-guide.md#minio-vs-s3).
+Notes:
+- **Temporal types:** the parsing assumes `timestamptz` (ISO-8601 strings → `parseDateTime64BestEffort*`). If a source column is plain `timestamp`, Debezium emits epoch micros — use `fromUnixTimestamp64Micro` instead (see the schema/02 header). Verify against `ccedb`.
+- **JSONB** columns (`raw_payload`, `definition`, `delivery_result`) arrive as JSON strings and are stored as `String`; the `MATERIALIZED` columns then extract from them.
+- Broker address is hardcoded `kafka:9092` in the Kafka-engine DDL (matches `KAFKA_BOOTSTRAP_SERVERS`).
 
 ---
 
@@ -159,8 +162,8 @@ practitioner_display String MATERIALIZED
 | `error_details` | String | Error detail (rejection drill-down) |
 | `received_at` | DateTime64(6) | Ingestion timestamp |
 | `updated_at` | DateTime64(6) | Last modification timestamp |
-| `_peerdb_version` | Int64 | CDC version for ReplacingMergeTree deduplication |
-| `_peerdb_is_deleted` | UInt8 | Soft-delete flag (1 = deleted in PostgreSQL) |
+| `_version` | UInt64 | CDC version for ReplacingMergeTree deduplication |
+| `_is_deleted` | UInt8 | Soft-delete flag (1 = deleted in PostgreSQL) |
 | `subject` | String (MATERIALIZED) | Patient identifier |
 | `event_type` | String (MATERIALIZED) | CloudEvents type |
 | `facility_id` | String (MATERIALIZED) | Facility identifier |
@@ -170,7 +173,7 @@ practitioner_display String MATERIALIZED
 | `practitioner_ref` | String (MATERIALIZED) | Practitioner reference |
 | `practitioner_display` | String (MATERIALIZED) | Practitioner name |
 
-**Engine:** `ReplacingMergeTree(_peerdb_version, _peerdb_is_deleted) SETTINGS clean_deleted_rows = 'Always'`  
+**Engine:** `ReplacingMergeTree(_version, _is_deleted) SETTINGS clean_deleted_rows = 'Always'`  
 **Partition:** `toYYYYMM(received_at)`  
 **Order By:** `(id)`
 
@@ -186,10 +189,10 @@ practitioner_display String MATERIALIZED
 | `enrolled_at` | DateTime64(6) |
 | `updated_at` | DateTime64(6) |
 | `expires_at` | Nullable(DateTime64(6)) |
-| `_peerdb_version` | Int64 |
-| `_peerdb_is_deleted` | UInt8 |
+| `_version` | UInt64 |
+| `_is_deleted` | UInt8 |
 
-**Engine:** `ReplacingMergeTree(_peerdb_version, _peerdb_is_deleted) SETTINGS clean_deleted_rows = 'Always'` | **Partition:** `toYYYYMM(enrolled_at)` | **Order By:** `(id)`
+**Engine:** `ReplacingMergeTree(_version, _is_deleted) SETTINGS clean_deleted_rows = 'Always'` | **Partition:** `toYYYYMM(enrolled_at)` | **Order By:** `(id)`
 
 #### `step_instances`
 
@@ -208,10 +211,10 @@ practitioner_display String MATERIALIZED
 | `created_at` | DateTime64(6) |
 | `updated_at` | DateTime64(6) |
 | `completed_at` | Nullable(DateTime64(6)) |
-| `_peerdb_version` | Int64 |
-| `_peerdb_is_deleted` | UInt8 |
+| `_version` | UInt64 |
+| `_is_deleted` | UInt8 |
 
-**Engine:** `ReplacingMergeTree(_peerdb_version, _peerdb_is_deleted) SETTINGS clean_deleted_rows = 'Always'` | **Partition:** `toYYYYMM(created_at)` | **Order By:** `(id)`
+**Engine:** `ReplacingMergeTree(_version, _is_deleted) SETTINGS clean_deleted_rows = 'Always'` | **Partition:** `toYYYYMM(created_at)` | **Order By:** `(id)`
 
 #### `deviations`
 
@@ -225,10 +228,10 @@ practitioner_display String MATERIALIZED
 | `intelligence_event_id` | Nullable(UUID) |
 | `metadata` | Nullable(String) |
 | `updated_at` | DateTime64(3) |
-| `_peerdb_version` | Int64 |
-| `_peerdb_is_deleted` | UInt8 |
+| `_version` | UInt64 |
+| `_is_deleted` | UInt8 |
 
-**Engine:** `ReplacingMergeTree(_peerdb_version, _peerdb_is_deleted) SETTINGS clean_deleted_rows = 'Always'`  
+**Engine:** `ReplacingMergeTree(_version, _is_deleted) SETTINGS clean_deleted_rows = 'Always'`  
 **Partition:** `toYYYYMM(detected_at)`  
 **Order By:** `(id)`
 

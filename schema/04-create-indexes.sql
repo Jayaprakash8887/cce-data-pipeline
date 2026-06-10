@@ -1,6 +1,6 @@
 -- CCE Analytics ClickHouse Schema
 -- Secondary indexes and TTL policies
--- Run: clickhouse-client --database cce_analytics < schema/03-create-indexes.sql
+-- Run: clickhouse-client --database cce_analytics < schema/04-create-indexes.sql
 
 
 USE cce_analytics;

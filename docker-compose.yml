@@ -1,47 +1,22 @@
-# CCE Data Pipeline — Docker Compose (Local Development / single-host)
+# CCE Data Pipeline — Docker Compose
 # Usage: docker compose up -d
 #
-# This file runs the data pipeline: ClickHouse (analytics serving layer) + the full PeerDB
-# OSS CDC stack (pinned stable-v0.36.26: catalog, temporal(+ui+admin-tools), flow-api,
-# flow-snapshot-worker, flow-worker, peerdb nexus, peerdb-ui, minio) + Prometheus/Grafana
-# for pipeline monitoring.
+# This repo owns the analytics path only: ClickHouse + a Kafka Connect worker running the
+# Debezium PostgreSQL source connector. It plugs into the EXISTING platform stack
+# (github.com/openphc/deploy-scripts) over the shared external network `cce-net`:
+#   - Kafka broker (confluentinc/cp-kafka, KRaft) — already deployed
+#   - PostgreSQL `ccedb` — already deployed (the CDC source)
+#   - Prometheus + Grafana — already deployed (reuse them; provisioning artifacts live in infra/)
+#   - cce-insights-service / cce-insights-ui — already deployed (query ClickHouse)
 #
-# Presentation (dashboards/UI) is NOT here — cce-insights-service + cce-insights-ui query
-# ClickHouse directly (see the "Presentation layer" note below).
+# Flow:  ccedb → Debezium (Kafka Connect) → Kafka topics (cce.public.*) →
+#        ClickHouse Kafka-engine tables → parsing MVs → ReplacingMergeTree(_version,_is_deleted)
 #
-# The PeerDB services and their support files are vendored under infra/peerdb/
-# from github.com/PeerDB-io/peerdb at tag stable-v0.36.26. Bump the image tags and
-# re-sync infra/peerdb/ together when upgrading.
+# ClickHouse ingests from Kafka directly (Kafka table engine), so there is NO ClickHouse sink
+# connector and NO S3/MinIO staging.
 #
-# Port map (host):
-#   8123 ClickHouse HTTP   9000 ClickHouse native   9363 ClickHouse metrics
-#   3001 Grafana           9090 Prometheus
-#   9900 PeerDB nexus SQL  3000 PeerDB UI           8085 Temporal UI
-#   8112 flow-api gRPC     8113 flow-api HTTP        7233 Temporal
-#   9901 PeerDB catalog    9001 MinIO S3 API        9002 MinIO console
-
-# Shared env for the three PeerDB flow services (identical upstream).
-x-peerdb-flow-env: &peerdb-flow-env
-  PEERDB_CLICKHOUSE_AWS_CREDENTIALS_AWS_ACCESS_KEY_ID: ${MINIO_ROOT_USER:-_peerdb_minioadmin}
-  PEERDB_CLICKHOUSE_AWS_CREDENTIALS_AWS_SECRET_ACCESS_KEY: ${MINIO_ROOT_PASSWORD:-_peerdb_minioadmin}
-  PEERDB_CLICKHOUSE_AWS_CREDENTIALS_AWS_REGION: us-east-1
-  # Single-network endpoint: reachable by BOTH flow-worker (writes Avro) and
-  # ClickHouse (reads via s3()). Swap to AWS S3 by unsetting this and setting
-  # real AWS_* creds/region below.
-  PEERDB_CLICKHOUSE_AWS_CREDENTIALS_AWS_ENDPOINT_URL_S3: http://minio:9000
-  PEERDB_CLICKHOUSE_AWS_S3_BUCKET_NAME: ${MINIO_BUCKET:-peerdbbucket}
-  PEERDB_CATALOG_HOST: catalog
-  PEERDB_CATALOG_PORT: 5432
-  PEERDB_CATALOG_USER: postgres
-  PEERDB_CATALOG_PASSWORD: postgres
-  PEERDB_CATALOG_DATABASE: postgres
-  TEMPORAL_HOST_PORT: temporal:7233
-  PEERDB_TEMPORAL_NAMESPACE: default
-  AWS_ACCESS_KEY_ID: ${AWS_ACCESS_KEY_ID:-}
-  AWS_SECRET_ACCESS_KEY: ${AWS_SECRET_ACCESS_KEY:-}
-  AWS_REGION: ${AWS_REGION:-}
-  AWS_ENDPOINT: ${AWS_ENDPOINT:-}
-  PEERDB_ALLOWED_TARGETS:
+# Port map (host):  8123 ClickHouse HTTP   9000 ClickHouse native   9363 ClickHouse metrics
+#                   8083 Kafka Connect REST
 
 services:
   # ============================================================
@@ -62,250 +37,52 @@ services:
       - clickhouse-data:/var/lib/clickhouse
       - ./infra/clickhouse/config.xml:/etc/clickhouse-server/config.d/custom.xml:ro
       - ./infra/clickhouse/users.xml:/etc/clickhouse-server/users.d/cce_pipeline.xml:ro
-      - ./schema:/docker-entrypoint-initdb.d:ro
+      # NOTE: schema is applied manually (see deployment-guide) rather than via
+      # docker-entrypoint-initdb.d, because schema/02 Kafka-engine tables need the broker reachable.
     healthcheck:
       test: ["CMD", "wget", "--spider", "-q", "http://localhost:8123/ping"]
       interval: 10s
       timeout: 5s
       retries: 5
+    networks: [cce-net]
     deploy:
       resources:
         limits:
           memory: 4g
 
   # ============================================================
-  # CDC — PeerDB OSS stack (vendored from PeerDB stable-v0.36.26)
+  # CDC — Kafka Connect worker running the Debezium PostgreSQL source connector
   # ============================================================
-
-  # Shared PostgreSQL catalog: PeerDB metadata + Temporal persistence.
-  catalog:
-    container_name: cce-peerdb-catalog
-    image: postgres:18-alpine
-    command: -c config_file=/etc/postgresql.conf
-    restart: unless-stopped
+  kafka-connect:
+    image: quay.io/debezium/connect:3.0.0.Final
+    container_name: cce-kafka-connect
     ports:
-      - "9901:5432"
+      - "8083:8083"   # Connect REST API (connector registration)
     environment:
-      PGUSER: postgres
-      POSTGRES_PASSWORD: postgres
-      POSTGRES_DB: postgres
-      POSTGRES_INITDB_ARGS: --locale=C.UTF-8
-    extra_hosts:
-      - "host.docker.internal:host-gateway"
-    volumes:
-      - pgdata:/var/lib/postgresql
-      - ./infra/peerdb/volumes/postgresql.conf:/etc/postgresql.conf
-      - ./infra/peerdb/volumes/docker-entrypoint-initdb.d:/docker-entrypoint-initdb.d
+      BOOTSTRAP_SERVERS: ${KAFKA_BOOTSTRAP_SERVERS:-kafka:9092}
+      GROUP_ID: cce-connect
+      CONFIG_STORAGE_TOPIC: cce_connect_configs
+      OFFSET_STORAGE_TOPIC: cce_connect_offsets
+      STATUS_STORAGE_TOPIC: cce_connect_statuses
+      CONFIG_STORAGE_REPLICATION_FACTOR: "1"
+      OFFSET_STORAGE_REPLICATION_FACTOR: "1"
+      STATUS_STORAGE_REPLICATION_FACTOR: "1"
+      KEY_CONVERTER: org.apache.kafka.connect.json.JsonConverter
+      VALUE_CONVERTER: org.apache.kafka.connect.json.JsonConverter
+    networks: [cce-net]
     healthcheck:
-      test: ["CMD", "pg_isready", "-d", "postgres", "-U", "postgres"]
-      interval: 10s
-      timeout: 30s
-      retries: 5
-      start_period: 60s
-
-  temporal:
-    container_name: cce-temporal
-    image: temporalio/auto-setup:1.29
-    restart: unless-stopped
-    depends_on:
-      catalog:
-        condition: service_healthy
-    environment:
-      - DB=postgres12
-      - DB_PORT=5432
-      - POSTGRES_USER=postgres
-      - POSTGRES_PWD=postgres
-      - POSTGRES_SEEDS=catalog
-      - DYNAMIC_CONFIG_FILE_PATH=config/dynamicconfig/development-sql.yaml
-    ports:
-      - "7233:7233"
-    volumes:
-      - ./infra/peerdb/volumes/temporal-dynamicconfig:/etc/temporal/config/dynamicconfig
-
-  temporal-admin-tools:
-    container_name: cce-temporal-admin-tools
-    image: temporalio/admin-tools:1.25.2-tctl-1.18.1-cli-1.1.1
-    restart: unless-stopped
-    depends_on:
-      - temporal
-    environment:
-      - TEMPORAL_ADDRESS=temporal:7233
-      - TEMPORAL_CLI_ADDRESS=temporal:7233
-      - TEMPORAL_CLI_SHOW_STACKS=1
-    stdin_open: true
-    tty: true
-    entrypoint: /etc/temporal/entrypoint.sh
-    healthcheck:
-      test: ["CMD", "tctl", "workflow", "list"]
-      interval: 1s
+      test: ["CMD-SHELL", "curl -sf http://localhost:8083/ || exit 1"]
+      interval: 15s
       timeout: 5s
-      retries: 30
-    volumes:
-      - ./infra/peerdb/scripts/mirror-name-search.sh:/etc/temporal/entrypoint.sh
-
-  temporal-ui:
-    container_name: cce-temporal-ui
-    image: temporalio/ui:2.50.0
-    restart: unless-stopped
-    depends_on:
-      - temporal
-    environment:
-      - TEMPORAL_ADDRESS=temporal:7233
-      - TEMPORAL_CORS_ORIGINS=http://localhost:3000
-      - TEMPORAL_CSRF_COOKIE_INSECURE=true
-    ports:
-      - "8085:8080"
-
-  flow-api:
-    container_name: flow_api
-    image: ghcr.io/peerdb-io/flow-api:stable-v0.36.26
-    restart: unless-stopped
-    ports:
-      - "8112:8112"   # gRPC (peerdb nexus → flow_api)
-      - "8113:8113"   # HTTP gateway (peerdb-ui → flow_api)
-    environment: *peerdb-flow-env
-    extra_hosts:
-      - "host.docker.internal:host-gateway"
-    depends_on:
-      temporal-admin-tools:
-        condition: service_healthy
-
-  flow-snapshot-worker:
-    container_name: cce-flow-snapshot-worker
-    image: ghcr.io/peerdb-io/flow-snapshot-worker:stable-v0.36.26
-    restart: unless-stopped
-    environment: *peerdb-flow-env
-    extra_hosts:
-      - "host.docker.internal:host-gateway"
-    depends_on:
-      temporal-admin-tools:
-        condition: service_healthy
-
-  flow-worker:
-    container_name: cce-flow-worker
-    image: ghcr.io/peerdb-io/flow-worker:stable-v0.36.26
-    restart: unless-stopped
-    environment: *peerdb-flow-env
-    extra_hosts:
-      - "host.docker.internal:host-gateway"
-    depends_on:
-      temporal-admin-tools:
-        condition: service_healthy
-
-  # PeerDB nexus — PostgreSQL-wire SQL interface (CREATE PEER / CREATE MIRROR).
-  peerdb:
-    container_name: peerdb-server
-    image: ghcr.io/peerdb-io/peerdb-server:stable-v0.36.26
-    stop_signal: SIGINT
-    restart: unless-stopped
-    environment:
-      PEERDB_CATALOG_HOST: catalog
-      PEERDB_CATALOG_PORT: 5432
-      PEERDB_CATALOG_USER: postgres
-      PEERDB_CATALOG_PASSWORD: postgres
-      PEERDB_CATALOG_DATABASE: postgres
-      PEERDB_PASSWORD: ${PEERDB_PASSWORD:-peerdb}
-      PEERDB_FLOW_SERVER_ADDRESS: grpc://flow_api:8112
-      RUST_LOG: info
-      RUST_BACKTRACE: 1
-    ports:
-      - "9900:9900"
-    depends_on:
-      catalog:
-        condition: service_healthy
-
-  peerdb-ui:
-    container_name: peerdb-ui
-    image: ghcr.io/peerdb-io/peerdb-ui:stable-v0.36.26
-    restart: unless-stopped
-    ports:
-      - "3000:3000"
-    environment:
-      PEERDB_CATALOG_HOST: catalog
-      PEERDB_CATALOG_PORT: 5432
-      PEERDB_CATALOG_USER: postgres
-      PEERDB_CATALOG_PASSWORD: postgres
-      PEERDB_CATALOG_DATABASE: postgres
-      PEERDB_FLOW_SERVER_HTTP: http://flow_api:8113
-      NEXTAUTH_SECRET: ${PEERDB_UI_NEXTAUTH_SECRET:-__changeme__}
-      NEXTAUTH_URL: http://localhost:3000
-      PEERDB_PASSWORD: ${PEERDB_PASSWORD:-peerdb}
-      PEERDB_EXPERIMENTAL_ENABLE_SCRIPTING: "true"
-    depends_on:
-      - flow-api
-
-  minio:
-    image: minio/minio:RELEASE.2025-10-15T17-29-55Z
-    container_name: cce-minio
-    restart: unless-stopped
-    volumes:
-      - minio-data:/data
-    ports:
-      - "9001:9000"    # S3 API
-      - "9002:36987"   # Console
-    environment:
-      MINIO_ROOT_USER: ${MINIO_ROOT_USER:-_peerdb_minioadmin}
-      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:-_peerdb_minioadmin}
-      PEERDB_CLICKHOUSE_AWS_S3_BUCKET_NAME: ${MINIO_BUCKET:-peerdbbucket}
-    entrypoint: >
-      /bin/sh -c "
-      minio server /data --console-address=:36987 &
-      sleep 2;
-      mc alias set myminiopeerdb http://minio:9000 $$MINIO_ROOT_USER $$MINIO_ROOT_PASSWORD;
-      mc mb --ignore-existing myminiopeerdb/$$PEERDB_CLICKHOUSE_AWS_S3_BUCKET_NAME;
-      wait
-      "
-
-  # ============================================================
-  # Presentation layer
-  # ============================================================
-  # The analytics serving layer is ClickHouse (cce_analytics). The dashboards/UI live in the
-  # separate cce-insights-service + cce-insights-ui apps, which query ClickHouse directly
-  # (HTTP 8123 or native 9000, user cce_pipeline). They are NOT part of this compose stack.
-
-  # ============================================================
-  # Monitoring
-  # ============================================================
-  prometheus:
-    image: prom/prometheus:v2.53.0
-    container_name: cce-prometheus
-    ports:
-      - "9090:9090"
-    volumes:
-      - ./infra/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
-      - prometheus-data:/prometheus
-    command:
-      - --config.file=/etc/prometheus/prometheus.yml
-      - --storage.tsdb.retention.time=7d
-    healthcheck:
-      test: ["CMD", "wget", "--spider", "-q", "http://localhost:9090/-/healthy"]
-      interval: 10s
-      timeout: 5s
-      retries: 5
-
-  grafana:
-    image: grafana/grafana:11.0.0
-    container_name: cce-grafana
-    depends_on:
-      prometheus:
-        condition: service_healthy
-    ports:
-      - "3001:3000"   # host 3001 — PeerDB UI owns 3000
-    environment:
-      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_PASSWORD:-admin}
-      GF_INSTALL_PLUGINS: grafana-clickhouse-datasource
-    volumes:
-      - grafana-data:/var/lib/grafana
-      - ./infra/grafana/provisioning:/etc/grafana/provisioning:ro
-    healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:3000/api/health"]
-      interval: 10s
-      timeout: 5s
-      retries: 5
+      retries: 10
+      start_period: 40s
 
 volumes:
   clickhouse-data:
-  prometheus-data:
-  grafana-data:
-  pgdata:
-  minio-data:
+
+# The platform's shared network (created by github.com/openphc/deploy-scripts).
+# Lets ClickHouse + Kafka Connect reach the existing kafka broker and ccedb, and lets
+# cce-insights-service reach ClickHouse. Create it there, or `docker network create cce-net`.
+networks:
+  cce-net:
+    external: true

@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Load Test for CCE Data Pipeline
 # Inserts CloudEvents directly into PostgreSQL (source of truth) to simulate production load.
-# PeerDB then replicates them to ClickHouse via WAL — tests the full CDC path.
+# Debezium then replicates them to ClickHouse via Kafka — tests the full CDC path.
 #
 # Usage: ./tests/load/run-load-test.sh [rows-per-second] [duration-seconds] [pg-host]
 #
@@ -105,6 +105,6 @@ echo "Duration:       ${ELAPSED}s"
 echo "Actual rate:    ~${ACTUAL_RATE} rows/second"
 echo ""
 echo "--- Verification ---"
-echo "Wait ~30s for PeerDB to replicate, then run:"
+echo "Wait ~30s for Debezium → Kafka → ClickHouse to replicate, then run:"
 echo "  curl 'http://localhost:8123/?database=cce_analytics' --data-binary \\"
 echo "    \"SELECT count() FROM inbound_event_logs WHERE received_at >= now() - INTERVAL $((DURATION + 60)) SECOND\""

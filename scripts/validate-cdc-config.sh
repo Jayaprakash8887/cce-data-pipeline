@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Validate PostgreSQL CDC configuration for PeerDB
+# Validate PostgreSQL CDC configuration for Debezium
 # Usage: ./scripts/validate-cdc-config.sh [host] [port] [user] [dbname]
 
 set -euo pipefail
@@ -31,7 +31,7 @@ WAL_KEEP=$(pg "SHOW max_slot_wal_keep_size;" 2>/dev/null || echo "-1")
 if [[ "$WAL_KEEP" != "-1" && "$WAL_KEEP" != "0" ]]; then
     echo "✓ max_slot_wal_keep_size = ${WAL_KEEP}"
 else
-    echo "✗ max_slot_wal_keep_size is unset — unbounded WAL growth risk if PeerDB falls behind"
+    echo "✗ max_slot_wal_keep_size is unset — unbounded WAL growth risk if Debezium falls behind"
     FAILURES=$((FAILURES + 1))
 fi
 

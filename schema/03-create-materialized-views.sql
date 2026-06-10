@@ -11,7 +11,7 @@
 --   - You can OPTIMIZE, ALTER, or inspect the backing table independently
 --   - All existing dashboard queries reference the backing table name — no query changes needed
 --
--- Run: clickhouse-client --database cce_analytics < schema/02-create-materialized-views.sql
+-- Run: clickhouse-client --database cce_analytics < schema/03-create-materialized-views.sql
 
 USE cce_analytics;
 
@@ -51,7 +51,7 @@ GROUP BY hour, facility_id, source, event_type, resource_type;
 -- compliance rates require CURRENT state from the mutable protocol_instances /
 -- step_instances tables, which an incremental MV cannot maintain without double-counting
 -- CDC UPDATE events. Query those tables with FINAL, or use the always-fresh argMaxState
--- current-state rollups (schema/05-current-state-rollups.sql) for the hot path.
+-- current-state rollups (schema/06-current-state-rollups.sql) for the hot path.
 
 -- Daily deviation counts by type
 CREATE TABLE IF NOT EXISTS mv_deviation_trends (
@@ -321,7 +321,7 @@ GROUP BY day, source, processing_status;
 -- status != 'RECEIVED': inbound_event_log rows are inserted as RECEIVED then updated
 -- to a terminal state. Both CDC events carry identical subject/facility_id/received_at,
 -- so filtering to terminal states halves writes without any correctness impact.
--- Used as the SOURCE for dict_patient_facility (see schema/04-create-dictionary.sql).
+-- Used as the SOURCE for dict_patient_facility (see schema/05-create-dictionary.sql).
 CREATE TABLE IF NOT EXISTS mv_patient_facility_latest (
     patient_id  String,
     facility_id String,

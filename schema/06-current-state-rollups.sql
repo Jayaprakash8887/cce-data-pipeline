@@ -1,5 +1,5 @@
 -- CCE Analytics ClickHouse Schema — Current-State Rollups (argMaxState)
--- Run: clickhouse-client --database cce_analytics < schema/05-current-state-rollups.sql
+-- Run: clickhouse-client --database cce_analytics < schema/06-current-state-rollups.sql
 --
 -- WHY THIS EXISTS
 -- The mutable entities (protocol_instances, step_instances, intelligence_deliveries) emit a
@@ -7,13 +7,13 @@
 -- (slow on big tables; also disables projections) or a periodic full recompute (stale).
 --
 -- Instead, these MVs keep ONE logical row per entity using AggregatingMergeTree +
--- argMaxState(col, _peerdb_version): the partial states merge in the background and a report
+-- argMaxState(col, _version): the partial states merge in the background and a report
 -- resolves the winner with argMaxMerge() — no FINAL, no double-counting, incremental, and
 -- ALWAYS FRESH (unlike a refreshable MV). This replaces the earlier refreshable rollup.
 --
 -- DELETE HANDLING (important — the generic argMax pattern omits this):
---   PeerDB emits a soft-delete event (_peerdb_is_deleted = 1) as the highest-version row.
---   We carry argMaxState(_peerdb_is_deleted, _peerdb_version) and every report filters
+--   Debezium emits a delete (op='d'); the schema/02 consumer MV sets _is_deleted=1 on that
+--   (highest-version) row. We carry argMaxState(_is_deleted, _version) and every report filters
 --   `WHERE is_deleted = 0`, so deleted entities drop out. (The base tables also physically
 --   purge deletes via clean_deleted_rows='Always', but the MV sees the delete event in the
 --   insert stream, so the guard is required here.)
@@ -37,11 +37,11 @@ CREATE TABLE IF NOT EXISTS rollup_protocol_instance_current
 (
     protocol_definition_id UUID,                                       -- stable dim (sort key)
     id                     UUID,                                       -- enrollment id (sort key)
-    patient_id             AggregateFunction(argMax, String, Int64),
-    protocol_canonical     AggregateFunction(argMax, String, Int64),
-    status                 AggregateFunction(argMax, String, Int64),
-    enrolled_at            AggregateFunction(argMax, DateTime64(6), Int64),
-    is_deleted             AggregateFunction(argMax, UInt8, Int64)
+    patient_id             AggregateFunction(argMax, String, UInt64),
+    protocol_canonical     AggregateFunction(argMax, String, UInt64),
+    status                 AggregateFunction(argMax, String, UInt64),
+    enrolled_at            AggregateFunction(argMax, DateTime64(6), UInt64),
+    is_deleted             AggregateFunction(argMax, UInt8, UInt64)
 ) ENGINE = AggregatingMergeTree
 ORDER BY (protocol_definition_id, id);
 
@@ -50,11 +50,11 @@ TO rollup_protocol_instance_current
 AS SELECT
     protocol_definition_id,
     id,
-    argMaxState(patient_id,         _peerdb_version) AS patient_id,
-    argMaxState(protocol_canonical, _peerdb_version) AS protocol_canonical,
-    argMaxState(status,             _peerdb_version) AS status,
-    argMaxState(enrolled_at,        _peerdb_version) AS enrolled_at,
-    argMaxState(_peerdb_is_deleted, _peerdb_version) AS is_deleted
+    argMaxState(patient_id,         _version) AS patient_id,
+    argMaxState(protocol_canonical, _version) AS protocol_canonical,
+    argMaxState(status,             _version) AS status,
+    argMaxState(enrolled_at,        _version) AS enrolled_at,
+    argMaxState(_is_deleted, _version) AS is_deleted
 FROM protocol_instances
 GROUP BY protocol_definition_id, id;
 
@@ -66,10 +66,10 @@ CREATE TABLE IF NOT EXISTS rollup_step_current
 (
     protocol_instance_id UUID,                                         -- stable dim (sort key)
     id                   UUID,                                         -- step id (sort key)
-    action_id            AggregateFunction(argMax, UUID, Int64),
-    state                AggregateFunction(argMax, String, Int64),
-    completion_status    AggregateFunction(argMax, String, Int64),
-    is_deleted           AggregateFunction(argMax, UInt8, Int64)
+    action_id            AggregateFunction(argMax, UUID, UInt64),
+    state                AggregateFunction(argMax, String, UInt64),
+    completion_status    AggregateFunction(argMax, String, UInt64),
+    is_deleted           AggregateFunction(argMax, UInt8, UInt64)
 ) ENGINE = AggregatingMergeTree
 ORDER BY (protocol_instance_id, id);
 
@@ -78,10 +78,10 @@ TO rollup_step_current
 AS SELECT
     protocol_instance_id,
     id,
-    argMaxState(action_id,          _peerdb_version) AS action_id,
-    argMaxState(state,              _peerdb_version) AS state,
-    argMaxState(completion_status,  _peerdb_version) AS completion_status,
-    argMaxState(_peerdb_is_deleted, _peerdb_version) AS is_deleted
+    argMaxState(action_id,          _version) AS action_id,
+    argMaxState(state,              _version) AS state,
+    argMaxState(completion_status,  _version) AS completion_status,
+    argMaxState(_is_deleted, _version) AS is_deleted
 FROM step_instances
 GROUP BY protocol_instance_id, id;
 
@@ -92,15 +92,15 @@ GROUP BY protocol_instance_id, id;
 CREATE TABLE IF NOT EXISTS rollup_delivery_current
 (
     id            UUID,                                                -- delivery id (sort key)
-    adaptor_name  AggregateFunction(argMax, String, Int64),
-    destination   AggregateFunction(argMax, String, Int64),
-    action_type   AggregateFunction(argMax, String, Int64),
-    subject       AggregateFunction(argMax, String, Int64),
-    status        AggregateFunction(argMax, String, Int64),
-    latency_ms    AggregateFunction(argMax, Int64, Int64),
-    attempt_count AggregateFunction(argMax, Int32, Int64),
-    created_at    AggregateFunction(argMax, DateTime64(6), Int64),
-    is_deleted    AggregateFunction(argMax, UInt8, Int64)
+    adaptor_name  AggregateFunction(argMax, String, UInt64),
+    destination   AggregateFunction(argMax, String, UInt64),
+    action_type   AggregateFunction(argMax, String, UInt64),
+    subject       AggregateFunction(argMax, String, UInt64),
+    status        AggregateFunction(argMax, String, UInt64),
+    latency_ms    AggregateFunction(argMax, Int64, UInt64),
+    attempt_count AggregateFunction(argMax, Int32, UInt64),
+    created_at    AggregateFunction(argMax, DateTime64(6), UInt64),
+    is_deleted    AggregateFunction(argMax, UInt8, UInt64)
 ) ENGINE = AggregatingMergeTree
 ORDER BY (id);
 
@@ -108,15 +108,15 @@ CREATE MATERIALIZED VIEW IF NOT EXISTS rollup_delivery_current_mv
 TO rollup_delivery_current
 AS SELECT
     id,
-    argMaxState(adaptor_name,       _peerdb_version) AS adaptor_name,
-    argMaxState(destination,        _peerdb_version) AS destination,
-    argMaxState(action_type,        _peerdb_version) AS action_type,
-    argMaxState(subject,            _peerdb_version) AS subject,
-    argMaxState(status,             _peerdb_version) AS status,
-    argMaxState(latency_ms,         _peerdb_version) AS latency_ms,
-    argMaxState(attempt_count,      _peerdb_version) AS attempt_count,
-    argMaxState(created_at,         _peerdb_version) AS created_at,
-    argMaxState(_peerdb_is_deleted, _peerdb_version) AS is_deleted
+    argMaxState(adaptor_name,       _version) AS adaptor_name,
+    argMaxState(destination,        _version) AS destination,
+    argMaxState(action_type,        _version) AS action_type,
+    argMaxState(subject,            _version) AS subject,
+    argMaxState(status,             _version) AS status,
+    argMaxState(latency_ms,         _version) AS latency_ms,
+    argMaxState(attempt_count,      _version) AS attempt_count,
+    argMaxState(created_at,         _version) AS created_at,
+    argMaxState(_is_deleted, _version) AS is_deleted
 FROM intelligence_deliveries
 GROUP BY id;
 

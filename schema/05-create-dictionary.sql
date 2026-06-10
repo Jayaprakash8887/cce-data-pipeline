@@ -1,6 +1,6 @@
 -- CCE Analytics ClickHouse Schema
 -- Dictionaries for fast lookups (replaces JOINs on dimension tables)
--- Run: clickhouse-client --database cce_analytics < schema/04-create-dictionary.sql
+-- Run: clickhouse-client --database cce_analytics < schema/05-create-dictionary.sql
 
 USE cce_analytics;
 

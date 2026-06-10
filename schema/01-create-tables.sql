@@ -1,19 +1,20 @@
 -- CCE Analytics ClickHouse Schema — Base Tables
--- Pre-created with ReplacingMergeTree(_peerdb_version, _peerdb_is_deleted).
--- Requires ClickHouse 23.2+.
+-- ReplacingMergeTree(_version, _is_deleted), ClickHouse 23.2+.
 --
--- PeerDB mirrors data into these tables (soft_delete = true in connectors/peerdb-mirror.sql):
---   - _peerdb_version    increments on every CDC event; used to pick the winning row
---   - _peerdb_is_deleted set to 1 for PostgreSQL DELETE events
---   - clean_deleted_rows = 'Always' removes deleted rows during background merges
+-- These tables are populated by the ClickHouse Kafka-engine consumer MVs (schema/02), which
+-- parse the Debezium JSON change events from Kafka. CDC-metadata columns:
+--   - _version     Debezium source.lsn (monotonic) — ReplacingMergeTree dedup version
+--   - _is_deleted  1 when op='d' (PostgreSQL DELETE) — set by the consumer MV
+--   - clean_deleted_rows = 'Always' physically removes deleted rows during background merges
 --
 -- Execution order:
---   1. Run this script:  clickhouse-client --database cce_analytics < schema/01-create-tables.sql
---   2. Create PeerDB mirror (see connectors/peerdb-mirror.sql) — PeerDB uses existing tables
---   3. Wait for initial snapshot to complete
---   4. Run schema/02-create-materialized-views.sql
---   5. Run schema/03-create-indexes.sql
---   6. Run schema/04-create-dictionary.sql
+--   1. Run this script:                     schema/01-create-tables.sql
+--   2. Kafka-engine queues + consumer MVs:  schema/02-kafka-ingestion.sql
+--   3. Register the Debezium connector:     ./scripts/register-connectors.sh (initial snapshot)
+--   4. Aggregation MVs:                      schema/03-create-materialized-views.sql
+--   5. Indexes:                              schema/04-create-indexes.sql
+--   6. Dictionaries:                         schema/05-create-dictionary.sql
+--   7. Current-state rollups:                schema/06-current-state-rollups.sql
 
 CREATE DATABASE IF NOT EXISTS cce_analytics;
 
@@ -38,10 +39,9 @@ CREATE TABLE IF NOT EXISTS inbound_event_logs
     received_at          DateTime64(6),
     updated_at           DateTime64(6),
 
-    -- PeerDB CDC metadata
-    _peerdb_version      Int64,
-    _peerdb_is_deleted   UInt8 DEFAULT 0,
-    _peerdb_synced_at    DateTime64(6),
+    -- Debezium CDC metadata (set by the schema/02 consumer MV)
+    _version             UInt64,
+    _is_deleted          UInt8 DEFAULT 0,
 
     -- MATERIALIZED: zero-cost extraction from raw_payload JSONB at insert time
     subject              String    MATERIALIZED JSONExtractString(raw_payload, 'subject'),
@@ -60,7 +60,7 @@ CREATE TABLE IF NOT EXISTS inbound_event_logs
     -- ALIAS: patient_id resolves to subject without extra storage
     patient_id           String    ALIAS subject
 )
-ENGINE = ReplacingMergeTree(_peerdb_version, _peerdb_is_deleted)
+ENGINE = ReplacingMergeTree(_version, _is_deleted)
 PARTITION BY toYYYYMM(received_at)
 ORDER BY (id)
 SETTINGS clean_deleted_rows = 'Always';
@@ -84,11 +84,10 @@ CREATE TABLE IF NOT EXISTS protocol_definitions
     created_at   DateTime64(6),
     updated_at   DateTime64(6),
 
-    _peerdb_version      Int64,
-    _peerdb_is_deleted   UInt8 DEFAULT 0,
-    _peerdb_synced_at    DateTime64(6)
+    _version             UInt64,
+    _is_deleted          UInt8 DEFAULT 0
 )
-ENGINE = ReplacingMergeTree(_peerdb_version, _peerdb_is_deleted)
+ENGINE = ReplacingMergeTree(_version, _is_deleted)
 ORDER BY (id)
 SETTINGS clean_deleted_rows = 'Always';
 
@@ -106,11 +105,10 @@ CREATE TABLE IF NOT EXISTS protocol_instances
     updated_at             DateTime64(6),
     expires_at             Nullable(DateTime64(6)),
 
-    _peerdb_version      Int64,
-    _peerdb_is_deleted   UInt8 DEFAULT 0,
-    _peerdb_synced_at    DateTime64(6)
+    _version             UInt64,
+    _is_deleted          UInt8 DEFAULT 0
 )
-ENGINE = ReplacingMergeTree(_peerdb_version, _peerdb_is_deleted)
+ENGINE = ReplacingMergeTree(_version, _is_deleted)
 PARTITION BY toYYYYMM(enrolled_at)
 ORDER BY (id)
 SETTINGS clean_deleted_rows = 'Always';
@@ -134,11 +132,10 @@ CREATE TABLE IF NOT EXISTS step_instances
     updated_at           DateTime64(6),
     completed_at         Nullable(DateTime64(6)),
 
-    _peerdb_version      Int64,
-    _peerdb_is_deleted   UInt8 DEFAULT 0,
-    _peerdb_synced_at    DateTime64(6)
+    _version             UInt64,
+    _is_deleted          UInt8 DEFAULT 0
 )
-ENGINE = ReplacingMergeTree(_peerdb_version, _peerdb_is_deleted)
+ENGINE = ReplacingMergeTree(_version, _is_deleted)
 PARTITION BY toYYYYMM(created_at)
 ORDER BY (id)
 SETTINGS clean_deleted_rows = 'Always';
@@ -154,11 +151,10 @@ CREATE TABLE IF NOT EXISTS deviations
     deviation_type       String,    -- OVERDUE | MISSED | ORDER_VIOLATION
     detected_at          DateTime64(6),
 
-    _peerdb_version      Int64,
-    _peerdb_is_deleted   UInt8 DEFAULT 0,
-    _peerdb_synced_at    DateTime64(6)
+    _version             UInt64,
+    _is_deleted          UInt8 DEFAULT 0
 )
-ENGINE = ReplacingMergeTree(_peerdb_version, _peerdb_is_deleted)
+ENGINE = ReplacingMergeTree(_version, _is_deleted)
 PARTITION BY toYYYYMM(detected_at)
 ORDER BY (id)
 SETTINGS clean_deleted_rows = 'Always';
@@ -174,11 +170,10 @@ CREATE TABLE IF NOT EXISTS compliance_event_logs
     processing_status String,    -- MATCHED | ZERO_MATCH | DUPLICATE
     received_at       DateTime64(6),
 
-    _peerdb_version      Int64,
-    _peerdb_is_deleted   UInt8 DEFAULT 0,
-    _peerdb_synced_at    DateTime64(6)
+    _version             UInt64,
+    _is_deleted          UInt8 DEFAULT 0
 )
-ENGINE = ReplacingMergeTree(_peerdb_version, _peerdb_is_deleted)
+ENGINE = ReplacingMergeTree(_version, _is_deleted)
 PARTITION BY toYYYYMM(received_at)
 ORDER BY (id)
 SETTINGS clean_deleted_rows = 'Always';
@@ -199,11 +194,10 @@ CREATE TABLE IF NOT EXISTS action_definitions
     created_at  DateTime64(6),
     updated_at  DateTime64(6),
 
-    _peerdb_version      Int64,
-    _peerdb_is_deleted   UInt8 DEFAULT 0,
-    _peerdb_synced_at    DateTime64(6)
+    _version             UInt64,
+    _is_deleted          UInt8 DEFAULT 0
 )
-ENGINE = ReplacingMergeTree(_peerdb_version, _peerdb_is_deleted)
+ENGINE = ReplacingMergeTree(_version, _is_deleted)
 ORDER BY (id)
 SETTINGS clean_deleted_rows = 'Always';
 
@@ -226,11 +220,10 @@ CREATE TABLE IF NOT EXISTS intelligence_event_logs
     -- event_payload (JSONB routing blob) excluded from the mirror — unused by analytics.
     created_at               DateTime64(6),
 
-    _peerdb_version      Int64,
-    _peerdb_is_deleted   UInt8 DEFAULT 0,
-    _peerdb_synced_at    DateTime64(6)
+    _version             UInt64,
+    _is_deleted          UInt8 DEFAULT 0
 )
-ENGINE = ReplacingMergeTree(_peerdb_version, _peerdb_is_deleted)
+ENGINE = ReplacingMergeTree(_version, _is_deleted)
 PARTITION BY toYYYYMM(created_at)
 ORDER BY (id)
 SETTINGS clean_deleted_rows = 'Always';
@@ -265,9 +258,8 @@ CREATE TABLE IF NOT EXISTS intelligence_deliveries
     updated_at                     DateTime64(6),
     delivered_at                   Nullable(DateTime64(6)),
 
-    _peerdb_version      Int64,
-    _peerdb_is_deleted   UInt8 DEFAULT 0,
-    _peerdb_synced_at    DateTime64(6),
+    _version             UInt64,
+    _is_deleted          UInt8 DEFAULT 0,
 
     -- MATERIALIZED: extracted from delivery_result JSONB at insert time
     http_status_code     Nullable(Int32) MATERIALIZED
@@ -275,7 +267,7 @@ CREATE TABLE IF NOT EXISTS intelligence_deliveries
     error_message        String MATERIALIZED
                              JSONExtractString(delivery_result, 'responseBody')
 )
-ENGINE = ReplacingMergeTree(_peerdb_version, _peerdb_is_deleted)
+ENGINE = ReplacingMergeTree(_version, _is_deleted)
 PARTITION BY toYYYYMM(created_at)
 ORDER BY (id)
 SETTINGS clean_deleted_rows = 'Always';

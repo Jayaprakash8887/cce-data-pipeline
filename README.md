@@ -1,80 +1,67 @@
 # CCE Data Pipeline
 
-Open-source **data pipeline** for the CCE (Clinical Care Engine) platform: a CDC-only path that lands committed PostgreSQL data into ClickHouse for analytics — **PostgreSQL → PeerDB → ClickHouse**. The `cce-insights-service` + `cce-insights-ui` apps consume ClickHouse to serve dashboards.
+Open-source **data pipeline** for the CCE (Clinical Care Engine) platform: a CDC-only path that lands committed PostgreSQL data into ClickHouse for analytics — **PostgreSQL → Debezium → Kafka → ClickHouse**. The `cce-insights-service` + `cce-insights-ui` apps consume ClickHouse to serve dashboards.
 
 ## Architecture
 
 ```
-PostgreSQL (ccedb) → PeerDB (logical replication) → ClickHouse (MVs)
-                                                          ↓
-                                  cce-insights-service / cce-insights-ui (separate repos)
+ccedb (PG16) → Debezium (Kafka Connect) → Kafka topics (cce.public.*)
+            → ClickHouse Kafka-engine tables → parsing MVs → ReplacingMergeTree(_version,_is_deleted)
+            → MVs / argMaxState rollups → cce-insights-service / cce-insights-ui (separate repos)
 ```
 
-**No Kafka. No custom application code in the pipeline.** PeerDB replicates directly from PostgreSQL WAL. All enrichment is handled by ClickHouse MATERIALIZED columns and Materialized Views. The presentation layer (dashboards/UI) is **not** in this repo — it lives in `cce-insights-service` / `cce-insights-ui`, which query ClickHouse directly.
+**Reuses the platform's existing Kafka.** This repo runs only **ClickHouse** + a **Kafka Connect worker** (the Debezium PostgreSQL source connector), joined to the shared `cce-net` network from [openphc/deploy-scripts](https://github.com/openphc/deploy-scripts) (which already provides Kafka, `ccedb`, Prometheus/Grafana, and the insights apps). Debezium publishes change events to Kafka; ClickHouse **Kafka-engine tables** consume them and parsing MVs land them into `ReplacingMergeTree` base tables — **no ClickHouse sink connector, no S3/MinIO staging**. All field enrichment is done by ClickHouse `MATERIALIZED` columns and MVs.
 
 ## Components
 
 | Component | Version | Purpose |
 |-----------|---------|---------|
-| ClickHouse | 26.3 LTS | Columnar OLAP analytics store (serving layer for insights-service) |
-| PeerDB | stable-v0.36.26 (OSS) | CDC from PostgreSQL (WAL-based, direct to ClickHouse). Full stack: nexus + flow-api + workers + temporal + MinIO |
-| Grafana | 11.x | Pipeline health monitoring (host port **3001**) |
-| Prometheus | 2.53 | Metrics collection |
+| ClickHouse | 26.3 LTS | Columnar OLAP store; consumes Kafka directly (Kafka engine) and serves insights-service |
+| Kafka Connect + Debezium | `quay.io/debezium/connect:3.0.0.Final` | PostgreSQL CDC source connector (pgoutput) with ReselectColumns for TOAST |
+| Kafka | confluentinc/cp-kafka 7.6.1 (KRaft) | **Reused** from the platform deploy (the change-event bus) |
 
-`docker compose up` runs ClickHouse **and** the full PeerDB OSS stack
-(catalog, temporal, flow-api, flow-snapshot-worker, flow-worker, nexus, peerdb-ui, minio),
-vendored under `infra/peerdb/` pinned to `stable-v0.36.26`, plus Prometheus/Grafana for
-pipeline monitoring. PeerDB UI is on **:3000**, Temporal UI on **:8085**, the nexus SQL
-interface on **:9900**. Dashboards/UI run separately (insights-service/ui).
+> Prometheus + Grafana are the platform's existing instances on `cce-net`; this repo ships their
+> provisioning artifacts (`infra/grafana`, `infra/prometheus`) to add there, not its own services.
 
-## Quick Start (Local Development)
+## Quick Start
 
-> **Note:** `ccedb` (the CCE source PostgreSQL) is **not** part of this stack — it is the
-> existing operational DB. Set `PG_HOST`/`CDC_USER`/`CDC_PASSWORD` etc. in `.env` to point at it.
+> `ccedb`, Kafka, and the insights apps live in the **platform stack** (openphc/deploy-scripts) on
+> the external `cce-net` network. Bring that up first (or `docker network create cce-net`).
 
 ```bash
-cp .env.example .env   # then edit: PG_*/CDC_* → your ccedb, MINIO_ROOT_PASSWORD, etc.
+cp .env.example .env   # edit CDC_*/CLICKHOUSE_PASSWORD/KAFKA_BOOTSTRAP_SERVERS
 set -a; source .env; set +a
 
-# Start everything (analytics + full PeerDB stack)
+# Start ClickHouse + Kafka Connect (joins the shared cce-net)
 docker compose up -d
 
-# Wait for the PeerDB nexus SQL interface to accept connections (port 9900)
-until PGPASSWORD="$PEERDB_PASSWORD" psql "host=localhost port=9900 user=peerdb dbname=peerdb" -c '\q' 2>/dev/null; do sleep 5; done
+# 1. ClickHouse schema: base tables, Kafka-engine queues + consumer MVs, aggregation MVs, indexes, dicts, rollups
+for f in schema/0*.sql; do clickhouse-client --database cce_analytics --multiquery < "$f"; done
 
-# Step 1 — Pre-create ClickHouse tables (MUST exist before the mirror starts)
-# ReplacingMergeTree(_peerdb_version, _peerdb_is_deleted) + clean_deleted_rows='Always' (ClickHouse 23.2+)
-# In dev these auto-run via docker-entrypoint-initdb.d; run manually for prod/re-runs.
-clickhouse-client --database cce_analytics --multiquery < schema/01-create-tables.sql
+# 2. Configure logical replication on the source ccedb (publication + REPLICA IDENTITY FULL)
+psql -h "$CDC_PG_HOST" -U postgres -d "$CDC_PG_DATABASE" -f cdc/01-configure-replication.sql
 
-# Step 2 — Configure logical replication on the source ccedb (run against your ccedb host)
-psql -h "$PG_HOST" -U postgres -d ccedb -f cdc/01-configure-replication.sql
-
-# Step 3 — Create PeerDB peers, then the mirror (nexus SQL @ :9900; scripts read .env)
-./scripts/create-peers.sh
+# 3. Register the Debezium connector on Kafka Connect (starts the initial snapshot)
 ./scripts/register-connectors.sh
 
-# Step 4 — Wait for initial snapshot, then create MVs, indexes, and dictionaries
+# 4. Verify CDC + ingestion
 ./scripts/check-connector-health.sh
-clickhouse-client --database cce_analytics --multiquery < schema/02-create-materialized-views.sql
-clickhouse-client --database cce_analytics --multiquery < schema/03-create-indexes.sql
-clickhouse-client --database cce_analytics --multiquery < schema/04-create-dictionary.sql
+./scripts/validate-clickhouse.sh
 ```
 
-**Web UIs:** PeerDB http://localhost:3000 · Temporal http://localhost:8085 · Grafana http://localhost:3001 · MinIO console http://localhost:9002
+**UIs:** Kafka UI http://localhost:8080 (platform) · Kafka Connect http://localhost:8083 · ClickHouse http://localhost:8123
 
-Once the snapshot completes and MVs exist, point `cce-insights-service` at ClickHouse
-(`http://localhost:8123` or native `9000`, user `cce_pipeline`) to serve dashboards.
+`cce-insights-service` (already on `cce-net`) reads ClickHouse via the `cce_pipeline` user (HTTP 8123 / native 9000).
 
 ## CDC Tables
 
-All data flows via Change Data Capture from committed PostgreSQL records (shared `ccedb` database). **9 tables** captured from 3 services (Collector, Compliance, Intelligence) → ClickHouse `cce_analytics` database.
+Change Data Capture from committed PostgreSQL records (shared `ccedb`). **9 tables** captured from 3 services (Collector, Compliance, Intelligence) → ClickHouse `cce_analytics`. Two large unused JSONB columns are excluded at the connector; `receiver_adaptor`/`destination_adaptor_mapping` are not captured.
 
-For full table listing and schema details, see [Data Flow & Schema Design](docs/data-flow.md).
+For the full table listing and the Kafka-ingestion design, see [Data Flow & Schema Design](docs/data-flow.md).
 
 ## Materialized Views
 
-**12 pre-aggregated views** computed at insert time, covering event volume, deviations, intelligence, and processing quality — across patient, facility, practitioner, and protocol dimensions. **Current-state** queries (compliance status, step rates, delivery outcomes) on the mutable entities use the always-fresh **`argMaxState` current-state rollups** in `schema/05` — incremental, no `FINAL`, no double-counting — or query the base tables with `FINAL` directly.
+**12 aggregation MVs** computed at insert time (event volume, deviations, intelligence, processing quality) across patient, facility, practitioner, and protocol dimensions. **Current-state** queries (compliance status, step rates, delivery outcomes) on the mutable entities use the always-fresh **`argMaxState` current-state rollups** in `schema/06` — incremental, no `FINAL`, no double-counting — or query the base tables with `FINAL`.
 
 For the complete MV catalog and coverage matrix, see [Data Flow & Schema Design § 4](docs/data-flow.md).
 
@@ -83,27 +70,26 @@ For the complete MV catalog and coverage matrix, see [Data Flow & Schema Design 
 | Document | Purpose |
 |----------|---------|
 | [Architecture Overview](docs/architecture-overview.md) | System context, principles, technology decisions, capacity planning, security |
-| [Data Flow & Schema](docs/data-flow.md) | CDC pipeline, ClickHouse DDL, MV catalog, query patterns |
+| [Data Flow & Schema](docs/data-flow.md) | CDC pipeline, Kafka ingestion, ClickHouse DDL, MV catalog, query patterns |
 | [Query Reference](docs/query-reference/) | Per-domain ClickHouse SQL for `cce-insights-service` to reuse |
 | [Deployment Guide](docs/deployment-guide.md) | Full lifecycle: setup, deploy, validate, operate, troubleshoot |
 
 ## Key Design Decisions
 
 1. **CDC-only** — Analytics based solely on committed database records. No in-flight event consumption.
-2. **PeerDB (not Debezium + Kafka)** — Direct WAL replication to ClickHouse. Simpler operations, fewer components, native TOAST support.
-3. **No Flink/stream processing** — ClickHouse MATERIALIZED columns extract fields from `raw_payload` JSON at insert time. Materialized Views pre-aggregate. Zero custom code.
-4. **ReplacingMergeTree (two-parameter form)** — All CDC tables are pre-created with `ReplacingMergeTree(_peerdb_version, _peerdb_is_deleted)` + `SETTINGS clean_deleted_rows = 'Always'` (ClickHouse 23.2+). PeerDB writes into existing tables. Deleted rows are physically purged during background merges.
-5. **AggregatingMergeTree / SummingMergeTree** — MVs on append-only tables (event logs, deviations) use `-State`/`-Merge` combinators for correct incremental aggregation. Mutable entities (step_instances, intelligence_deliveries, protocol_instances) are queried directly via `FINAL` — not via MVs — to avoid double-counting CDC UPDATE events.
-6. **Two ClickHouse user profiles** — `analytics` (readonly, `final=1` applied automatically) for `cce-insights-service`/analysts; `peerdb_writer` (write access, no FINAL overhead) for the PeerDB CDC writer.
+2. **Debezium + Kafka (not PeerDB)** — chosen for future fan-out to other consumers and because Kafka is already deployed. ClickHouse consumes Kafka directly (Kafka engine), so there's no sink connector and no S3 staging.
+3. **ReselectColumns for TOAST** — large unchanged JSONB (e.g. `raw_payload`) is re-read from the source so it never arrives as Debezium's `__debezium_unavailable_value` placeholder (which would corrupt the MATERIALIZED extractions).
+4. **No Flink/stream processing** — ClickHouse `MATERIALIZED` columns extract fields from `raw_payload` JSON at insert time; MVs pre-aggregate. Zero custom code.
+5. **ReplacingMergeTree(_version, _is_deleted)** — `_version` = Debezium `source.lsn` (monotonic), `_is_deleted` = `op='d'`; `clean_deleted_rows='Always'` purges deletes on merge.
+6. **Mutable entities via argMaxState/FINAL, not count-MVs** — status counts and step rates on the mutable tables come from the `argMaxState` current-state rollups (or base-table `FINAL`), never count-based MVs that would double-count CDC UPDATEs.
 
 ## Scripts
 
 | Script | Purpose |
 |--------|---------|
-| `scripts/create-peers.sh` | Create PeerDB peers (`ccedb_peer`, `clickhouse_peer`) via the nexus |
-| `scripts/register-connectors.sh` | Create the `cce_analytics_mirror` CDC mirror |
-| `scripts/check-connector-health.sh` | PeerDB stack + mirror health |
-| `scripts/validate-clickhouse.sh` | Validate all tables and MVs exist |
-| `scripts/data-quality-checks.sh` | Row counts, freshness, integrity checks |
+| `scripts/register-connectors.sh` | Register/update the Debezium source connector on Kafka Connect |
+| `scripts/check-connector-health.sh` | Debezium connector + ClickHouse ingestion health |
+| `scripts/resnapshot-mirror.sh` | Reset offsets + drop slot + truncate + re-snapshot |
 | `scripts/validate-cdc-config.sh` | Validate PostgreSQL logical-replication config |
-| `scripts/resnapshot-mirror.sh` | Drop + re-snapshot the mirror |
+| `scripts/validate-clickhouse.sh` | Validate base tables, Kafka queues/consumer MVs, aggregation MVs, dicts |
+| `scripts/data-quality-checks.sh` | Row counts, freshness, integrity checks |

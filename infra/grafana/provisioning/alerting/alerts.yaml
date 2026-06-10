@@ -6,10 +6,10 @@ groups:
     folder: CCE Data Pipeline
     interval: 60s
     rules:
-      # CDC liveness via the PostgreSQL replication slot: when PeerDB stops consuming the
+      # CDC liveness via the PostgreSQL replication slot: when Debezium stops consuming the
       # slot, `active` flips to false. This is the source-side proxy for "mirror down".
-      # (PeerDB v0.36.26 exposes its own metrics via OpenTelemetry, not Prometheus; if you
-      #  run an OTel collector you can additionally alert on peerdb_flow_status/cdc_lag.)
+      # (Kafka Connect exposes Debezium metrics via JMX; if you wire a JMX/Prometheus exporter you
+      #  can additionally alert on the Debezium connector/task state.)
       - uid: cdc-slot-inactive
         title: "CDC Replication Slot Inactive"
         condition: A
@@ -20,7 +20,7 @@ groups:
               rawSql: "SELECT count() FROM pg_replication_slots WHERE slot_name = 'cce_analytics_slot' AND active = false"
         for: 2m
         annotations:
-          summary: "PeerDB is not consuming the cce_analytics_slot replication slot (CDC stalled)"
+          summary: "Debezium is not consuming the cce_analytics_slot replication slot (CDC stalled)"
         labels:
           severity: critical
 
