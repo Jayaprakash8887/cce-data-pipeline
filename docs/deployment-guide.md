@@ -20,62 +20,37 @@
 ## 1. Prerequisites
 
 ### Pre-deployment Checklist
-- [ ] All secrets provisioned in secret store
-- [ ] PostgreSQL `wal_level = logical` confirmed
-- [ ] PostgreSQL `REPLICA IDENTITY FULL` set on all 9 CDC tables
-- [ ] PostgreSQL replication slot created: `cce_analytics_slot`
-- [ ] PostgreSQL publication created: `cce_analytics_pub`
-- [ ] ClickHouse database `cce_analytics` created
-- [ ] ClickHouse user `cce_pipeline` (analytics, readonly) created with grants
-- [ ] Kafka Connect (Debezium) worker deployed on cce-net (this repo)
-- [ ] Kafka broker reachable from Kafka Connect + ClickHouse (platform cce-net)
-- [ ] Network connectivity verified between all services
-- [ ] DNS entries configured for Grafana (and the external `cce-insights-ui`)
+These are **outcomes to confirm**, not separate manual steps — the scripts below produce them.
+- [ ] Platform stack up on `cce-net` (Kafka, `ccedb`, Prometheus/Grafana) — or at least `docker network create cce-net`
+- [ ] **PostgreSQL source prepared** by `cdc/01-configure-replication.sql` and confirmed by `scripts/validate-cdc-config.sh` — i.e. `wal_level=logical`, role `cce_cdc_user`, `REPLICA IDENTITY FULL` on all 9 tables, and publication `cce_analytics_pub`
+- [ ] PostgreSQL **restarted** if `wal_level` had to change (logical replication needs the restart)
+- [ ] ClickHouse database `cce_analytics` + user `cce_pipeline` created (done by the container env on first boot)
+- [ ] Kafka Connect reachable at `$CONNECT_URL`; broker reachable from Kafka Connect **and** ClickHouse
+- [ ] Secrets provisioned (see below)
 - [ ] Docker + Docker Compose v2 (or the components run directly on the server)
 
+> The replication **slot** `cce_analytics_slot` is **not** created manually — Debezium auto-creates
+> it on first connect. Only the *publication* must pre-exist (the connector sets
+> `publication.autocreate.mode=disabled`), which `cdc/01` creates.
+
 ### PostgreSQL Configuration
-```sql
--- Enable logical replication (requires restart)
-ALTER SYSTEM SET wal_level = 'logical';
-ALTER SYSTEM SET max_replication_slots = 4;
-ALTER SYSTEM SET max_slot_wal_keep_size = '10GB';
 
--- Create CDC user with replication permissions
-CREATE USER cce_cdc_user WITH REPLICATION PASSWORD '***';
-GRANT SELECT ON ALL TABLES IN SCHEMA public TO cce_cdc_user;
--- publication is created by cdc/01-configure-replication.sql (run as a privileged role)
+All source-side CDC setup is defined **once** in [`cdc/01-configure-replication.sql`](../cdc/01-configure-replication.sql) — the single source of truth. It sets `wal_level=logical`, the slot/WAL limits (`max_replication_slots`, `max_wal_senders`, `max_slot_wal_keep_size`), the `cce_cdc_user` role, `REPLICA IDENTITY FULL` on all 9 tables, and the `cce_analytics_pub` publication. Run it once as a privileged role, then verify:
 
--- Set REPLICA IDENTITY FULL on all CDC tables (required for TOAST columns)
-ALTER TABLE inbound_event_log REPLICA IDENTITY FULL;
-ALTER TABLE protocol_definition REPLICA IDENTITY FULL;
-ALTER TABLE protocol_instance REPLICA IDENTITY FULL;
-ALTER TABLE step_instance REPLICA IDENTITY FULL;
-ALTER TABLE deviation REPLICA IDENTITY FULL;
-ALTER TABLE intelligence_event_log REPLICA IDENTITY FULL;
-ALTER TABLE intelligence_delivery REPLICA IDENTITY FULL;
-ALTER TABLE action_definition REPLICA IDENTITY FULL;
-ALTER TABLE compliance_event_log REPLICA IDENTITY FULL;
-
--- Create publication for all 9 CDC tables
-CREATE PUBLICATION cce_analytics_pub FOR TABLE
-    inbound_event_log,
-    protocol_definition,
-    protocol_instance,
-    step_instance,
-    deviation,
-    intelligence_event_log,
-    intelligence_delivery,
-    action_definition,
-    compliance_event_log;
+```bash
+psql -h "$CDC_PG_HOST" -U postgres -d "$CDC_PG_DATABASE" -f cdc/01-configure-replication.sql
+./scripts/validate-cdc-config.sh "$CDC_PG_HOST" "$CDC_PG_PORT" postgres "$CDC_PG_DATABASE"
 ```
+
+- If `wal_level` was not already `logical`, PostgreSQL must be **restarted** for it to take effect (the script changes the setting but cannot restart the server).
+- Don't re-list the SQL here — edit `cdc/01-configure-replication.sql` so there's no second copy to drift.
 
 ### Secrets
 
 | Secret | Purpose | Required By |
 |--------|---------|-------------|
 | `CLICKHOUSE_PASSWORD` | ClickHouse `cce_pipeline` user | clickhouse, cce-insights-service |
-| `CDC_PASSWORD` | PostgreSQL replication user | Debezium connector |
-| `GRAFANA_PASSWORD` | Admin password | grafana |
+| `CDC_PASSWORD` | PostgreSQL replication user (`cce_cdc_user`) | Debezium connector |
 
 
 ---
@@ -280,13 +255,9 @@ SELECT pg_wal_lsn_diff(pg_current_wal_lsn(), confirmed_flush_lsn) AS lag_bytes
 FROM pg_replication_slots WHERE slot_name = 'cce_analytics_slot';
 ```
 
-**Required PostgreSQL setting:**
+**Relevant setting** — `max_slot_wal_keep_size` caps how much WAL PostgreSQL retains for an inactive slot, so a stalled Debezium can't fill the disk unbounded. It's **already applied by `cdc/01-configure-replication.sql`** (don't set it separately here). If it's exceeded, PostgreSQL invalidates the slot — see Recovery below.
 
-```
-max_slot_wal_keep_size = 10GB   -- prevents unbounded WAL growth if Debezium/Connect is down
-```
-
-> **Recovery**: If the slot is inactive and WAL exceeds the limit, PostgreSQL will invalidate the slot. Debezium will fail to resume and requires a full re-snapshot (./scripts/resnapshot-mirror.sh). Monitor the `pg_wal_lsn_diff_bytes` metric and alert at 1 GB.
+> **Recovery**: If the slot is inactive and WAL exceeds the limit, PostgreSQL will invalidate the slot. Debezium will fail to resume and requires a full re-snapshot (`./scripts/resnapshot-mirror.sh`). Monitor the `pg_wal_lsn_diff_bytes` metric and alert at 1 GB.
 
 ### Alerts
 
