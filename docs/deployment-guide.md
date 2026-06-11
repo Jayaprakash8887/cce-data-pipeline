@@ -118,7 +118,7 @@ Dashboards/UI are **not** deployed by this repo. `cce-insights-service` + `cce-i
 - **ClickHouse connection:** host `clickhouse` (in-network) or the published host, HTTP `8123`
   / native `9000`, database `cce_analytics`, user `cce_pipeline` (read-only, `final=1`)
 - **AuthN/AuthZ (incl. Keycloak):** handled by `cce-insights-service`
-- Reuse the queries in [`docs/query-reference/`](query-reference/)
+- **Query logic** lives in the `cce-insights-service` repo (targets the `schema/` defined here)
 
 ### 2.4 Prometheus + Grafana
 

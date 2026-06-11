@@ -71,7 +71,6 @@ For the complete MV catalog and coverage matrix, see [Data Flow & Schema Design 
 |----------|---------|
 | [Architecture Overview](docs/architecture-overview.md) | System context, principles, technology decisions, capacity planning, security |
 | [Data Flow & Schema](docs/data-flow.md) | CDC pipeline, Kafka ingestion, ClickHouse DDL, MV catalog, query patterns |
-| [Query Reference](docs/query-reference/) | Per-domain ClickHouse SQL for `cce-insights-service` to reuse |
 | [Deployment Guide](docs/deployment-guide.md) | Full lifecycle: setup, deploy, validate, operate, troubleshoot |
 
 ## Key Design Decisions

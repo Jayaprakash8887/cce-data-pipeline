@@ -180,7 +180,8 @@ clinical views. Responsibilities that live in those apps:
 - **Facility/role scoping** — enforced in the service layer
 - **Bespoke clinical views** — patient detail, workflow timelines, source comparison, etc.
 
-Per-domain ClickHouse SQL the service can reuse is in [Query Reference](query-reference/).
+Per-domain query logic lives in the `cce-insights-service` repo; this repo provides the
+ClickHouse schema (`schema/`) those queries target.
 
 ### 4.4 Operational Monitoring (Grafana + Prometheus)
 
