@@ -74,10 +74,14 @@ A Debezium PostgreSQL connector on Kafka Connect reads the WAL via logical repli
 | Compliance Service | `action_definition` | `action_definitions` |
 | Compliance Service | `compliance_event_log` | `compliance_event_logs` |
 | Intelligence Service | `intelligence_delivery` | `intelligence_deliveries` |
+| Intelligence Service | `receiver_adaptor` | `receiver_adaptor` |
+| Intelligence Service | `destination_adaptor_mapping` | `destination_adaptor_mapping` |
 
-> **Note:** All CCE services share a single PostgreSQL database (`ccedb`). `REPLICA IDENTITY FULL` is set on all tables to ensure TOAST'd JSONB columns are fully replicated during UPDATEs.
+> **Note:** All CCE services share a single PostgreSQL database (`ccedb`). `REPLICA IDENTITY FULL` is set on all 11 tables so TOAST'd JSONB columns are fully replicated during UPDATEs. Column names/types are reconciled against the **live** `ccedb` schema.
 >
-> **Not mirrored:** `receiver_adaptor` and `destination_adaptor_mapping` are unused by analytics (adaptor metadata is denormalized into `intelligence_deliveries`). Two large JSONB columns are also excluded from the sync: `intelligence_event_log.event_payload` and `intelligence_delivery.fhir_payload`.
+> **Adaptor tables:** `receiver_adaptor` + `destination_adaptor_mapping` are captured (the adaptor name/endpoint/routing is **not** denormalized onto `intelligence_delivery`); resolve delivery → adaptor via `dict_delivery_adaptor` (schema/05).
+>
+> **Excluded columns:** two large unused JSONB columns are dropped at the connector — `intelligence_event_log.event_payload` and `intelligence_delivery.fhir_payload`.
 
 ### 2.2 Deduplication & Delete Handling
 
@@ -110,7 +114,7 @@ ClickHouse consumes the Debezium topics **directly** — no sink connector. For 
    - `_version = source.lsn`; `_is_deleted = (op='d')`; `WHERE op IN ('c','u','r','d')`
 
 Notes:
-- **Temporal types:** the parsing assumes `timestamptz` (ISO-8601 strings → `parseDateTime64BestEffort*`). If a source column is plain `timestamp`, Debezium emits epoch micros — use `fromUnixTimestamp64Micro` instead (see the schema/02 header). Verify against `ccedb`.
+- **Temporal types:** verified on live `ccedb` — every timestamp column is `timestamptz`, so Debezium emits ISO-8601 strings and `parseDateTime64BestEffort*` is correct throughout (no micros-integer columns, so no `fromUnixTimestamp64Micro` needed).
 - **JSONB** columns (`raw_payload`, `definition`, `delivery_result`) arrive as JSON strings and are stored as `String`; the `MATERIALIZED` columns then extract from them.
 - **Broker** is not in the DDL: the queues use `ENGINE = Kafka(cce_kafka)`, a named collection
   (`infra/clickhouse/named-collections.xml`) whose broker is read from `KAFKA_BOOTSTRAP_SERVERS`

@@ -22,7 +22,7 @@
 ### Pre-deployment Checklist
 These are **outcomes to confirm**, not separate manual steps — the scripts below produce them.
 - [ ] Platform stack up on `cce-net` (Kafka, `ccedb`, Prometheus/Grafana) — or at least `docker network create cce-net`
-- [ ] **PostgreSQL source prepared** by `cdc/01-configure-replication.sql` and confirmed by `scripts/validate-cdc-config.sh` — i.e. `wal_level=logical`, role `cce_cdc_user`, `REPLICA IDENTITY FULL` on all 9 tables, and publication `cce_analytics_pub`
+- [ ] **PostgreSQL source prepared** by `cdc/01-configure-replication.sql` and confirmed by `scripts/validate-cdc-config.sh` — i.e. `wal_level=logical`, role `cce_cdc_user`, `REPLICA IDENTITY FULL` on all 11 tables, and publication `cce_analytics_pub`
 - [ ] PostgreSQL **restarted** if `wal_level` had to change (logical replication needs the restart)
 - [ ] ClickHouse database `cce_analytics` + user `cce_pipeline` created (done by the container env on first boot)
 - [ ] Kafka Connect reachable at `$CONNECT_URL`; broker reachable from Kafka Connect **and** ClickHouse
@@ -35,7 +35,7 @@ These are **outcomes to confirm**, not separate manual steps — the scripts bel
 
 ### PostgreSQL Configuration
 
-All source-side CDC setup is defined **once** in [`cdc/01-configure-replication.sql`](../cdc/01-configure-replication.sql) — the single source of truth. It sets `wal_level=logical`, the slot/WAL limits (`max_replication_slots`, `max_wal_senders`, `max_slot_wal_keep_size`), the `cce_cdc_user` role, `REPLICA IDENTITY FULL` on all 9 tables, and the `cce_analytics_pub` publication. Run it once as a privileged role, then verify:
+All source-side CDC setup is defined **once** in [`cdc/01-configure-replication.sql`](../cdc/01-configure-replication.sql) — the single source of truth. It sets `wal_level=logical`, the slot/WAL limits (`max_replication_slots`, `max_wal_senders`, `max_slot_wal_keep_size`), the `cce_cdc_user` role, `REPLICA IDENTITY FULL` on all 11 tables, and the `cce_analytics_pub` publication. Run it once as a privileged role, then verify:
 
 ```bash
 psql -h "$CDC_PG_HOST" -U postgres -d "$CDC_PG_DATABASE" -f cdc/01-configure-replication.sql
@@ -219,8 +219,8 @@ Then register the Debezium connector (§5) to start the snapshot.
 |-------|---------|----------|
 | ClickHouse alive | `curl -s http://localhost:8123/ping` | `Ok.` |
 | Tables exist | `clickhouse-client -q "SELECT count() FROM system.tables WHERE database='cce_analytics'"` | `>= 9` |
-| MVs + consumer MVs exist | `clickhouse-client -q "SELECT count() FROM system.tables WHERE database='cce_analytics' AND engine='MaterializedView'"` | `>= 24` (12 aggregation + 9 consumer + 3 rollup) |
-| Kafka queues exist | `clickhouse-client -q "SELECT count() FROM system.tables WHERE database='cce_analytics' AND engine='Kafka'"` | `9` |
+| MVs + consumer MVs exist | `clickhouse-client -q "SELECT count() FROM system.tables WHERE database='cce_analytics' AND engine='MaterializedView'"` | `>= 26` (12 aggregation + 11 consumer + 3 rollup) |
+| Kafka queues exist | `clickhouse-client -q "SELECT count() FROM system.tables WHERE database='cce_analytics' AND engine='Kafka'"` | `11` |
 | Data flowing | `clickhouse-client -q "SELECT count() FROM cce_analytics.inbound_event_logs"` | `> 0` after snapshot |
 | Debezium connector | `./scripts/check-connector-health.sh` | `HEALTHY` |
 | Connector status | `curl -s $CONNECT_URL/connectors/cce-ccedb-source/status \| jq .connector.state` | `RUNNING` |

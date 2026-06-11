@@ -55,7 +55,7 @@ psql -h "$CDC_PG_HOST" -U postgres -d "$CDC_PG_DATABASE" -f cdc/01-configure-rep
 
 ## CDC Tables
 
-Change Data Capture from committed PostgreSQL records (shared `ccedb`). **9 tables** captured from 3 services (Collector, Compliance, Intelligence) → ClickHouse `cce_analytics`. Two large unused JSONB columns are excluded at the connector; `receiver_adaptor`/`destination_adaptor_mapping` are not captured.
+Change Data Capture from committed PostgreSQL records (shared `ccedb`). **11 tables** captured from 3 services (Collector, Compliance, Intelligence) → ClickHouse `cce_analytics`. Columns are reconciled against the live `ccedb` schema. Two large unused JSONB columns (`intelligence_event_log.event_payload`, `intelligence_delivery.fhir_payload`) are excluded at the connector.
 
 For the full table listing and the Kafka-ingestion design, see [Data Flow & Schema Design](docs/data-flow.md).
 
