@@ -145,7 +145,7 @@ the apps own presentation and query ClickHouse via the `cce_pipeline` user.
 
 A **Debezium PostgreSQL source connector** (on a Kafka Connect worker, `pgoutput` plugin) reads `ccedb`'s WAL and publishes JSON change events to Kafka topics `cce.public.<table>`. **ClickHouse ingests Kafka directly**: per source table there is a Kafka-engine "queue" table and a consumer MV (`schema/02-kafka-ingestion.sql`) that parses the Debezium envelope and inserts the flat row into the `ReplacingMergeTree(_version, _is_deleted)` base table (`schema/01`). There is **no ClickHouse sink connector and no S3 staging**.
 
-All 9 CDC tables reside in the shared `ccedb` database. The connector excludes two large unused JSONB columns (`intelligence_event_log.event_payload`, `intelligence_delivery.fhir_payload`) and does not capture `receiver_adaptor`/`destination_adaptor_mapping`. For the full table listing, connector config, and the envelope-parsing details, see [Data Flow & Schema Design](data-flow.md).
+All 11 CDC tables reside in the shared `ccedb` database (columns reconciled against the live schema). The connector excludes two large unused JSONB columns (`intelligence_event_log.event_payload`, `intelligence_delivery.fhir_payload`); `receiver_adaptor` + `destination_adaptor_mapping` **are** captured (they hold adaptor name/endpoint/routing, which is not denormalized onto `intelligence_delivery`). For the full table listing, connector config, and the envelope-parsing details, see [Data Flow & Schema Design](data-flow.md).
 
 **CDC-metadata columns** (derived by the consumer MV from the Debezium envelope):
 - `_version` — Debezium `source.lsn` (monotonic WAL position) → ReplacingMergeTree dedup version
