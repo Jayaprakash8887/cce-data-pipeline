@@ -111,7 +111,9 @@ ClickHouse consumes the Debezium topics **directly** — no sink connector. For 
 Notes:
 - **Temporal types:** the parsing assumes `timestamptz` (ISO-8601 strings → `parseDateTime64BestEffort*`). If a source column is plain `timestamp`, Debezium emits epoch micros — use `fromUnixTimestamp64Micro` instead (see the schema/02 header). Verify against `ccedb`.
 - **JSONB** columns (`raw_payload`, `definition`, `delivery_result`) arrive as JSON strings and are stored as `String`; the `MATERIALIZED` columns then extract from them.
-- Broker address is hardcoded `kafka:9092` in the Kafka-engine DDL (matches `KAFKA_BOOTSTRAP_SERVERS`).
+- **Broker** is not in the DDL: the queues use `ENGINE = Kafka(cce_kafka)`, a named collection
+  (`infra/clickhouse/named-collections.xml`) whose broker is read from `KAFKA_BOOTSTRAP_SERVERS`
+  via `from_env` — the same env var the Debezium worker uses, so it's set once in `.env`.
 
 ---
 

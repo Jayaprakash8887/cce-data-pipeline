@@ -20,8 +20,11 @@
 --   (time.precision.mode=adaptive_time_microseconds) emits micros-since-epoch as an integer;
 --   for those, replace the parse with: fromUnixTimestamp64Micro(JSONExtractInt(payload,'col')).
 --
--- BROKER: the Kafka bootstrap is hardcoded to 'kafka:9092' (matches KAFKA_BOOTSTRAP_SERVERS on
--- the shared cce-net). Change here if your broker address differs.
+-- BROKER: the Kafka tables use ENGINE = Kafka(cce_kafka), a named collection defined ONCE in
+-- infra/clickhouse/named-collections.xml whose broker is read from the KAFKA_BOOTSTRAP_SERVERS
+-- env var (set on the ClickHouse container, sourced from .env — the same var the Debezium worker
+-- uses). To change the broker, edit .env only; nothing here needs to change.
+-- (Only the per-table topic / consumer group / format live in the DDL below.)
 
 USE cce_analytics;
 
@@ -29,8 +32,7 @@ USE cce_analytics;
 -- inbound_event_logs
 -- ============================================================
 CREATE TABLE IF NOT EXISTS inbound_event_logs_queue (raw String)
-ENGINE = Kafka SETTINGS
-    kafka_broker_list = 'kafka:9092',
+ENGINE = Kafka(cce_kafka) SETTINGS
     kafka_topic_list  = 'cce.public.inbound_event_log',
     kafka_group_name  = 'clickhouse_inbound_event_logs',
     kafka_format      = 'JSONAsString',
@@ -60,8 +62,7 @@ WHERE op IN ('c', 'u', 'r', 'd');
 -- protocol_definitions
 -- ============================================================
 CREATE TABLE IF NOT EXISTS protocol_definitions_queue (raw String)
-ENGINE = Kafka SETTINGS
-    kafka_broker_list = 'kafka:9092',
+ENGINE = Kafka(cce_kafka) SETTINGS
     kafka_topic_list  = 'cce.public.protocol_definition',
     kafka_group_name  = 'clickhouse_protocol_definitions',
     kafka_format      = 'JSONAsString',
@@ -89,8 +90,7 @@ WHERE op IN ('c', 'u', 'r', 'd');
 -- protocol_instances
 -- ============================================================
 CREATE TABLE IF NOT EXISTS protocol_instances_queue (raw String)
-ENGINE = Kafka SETTINGS
-    kafka_broker_list = 'kafka:9092',
+ENGINE = Kafka(cce_kafka) SETTINGS
     kafka_topic_list  = 'cce.public.protocol_instance',
     kafka_group_name  = 'clickhouse_protocol_instances',
     kafka_format      = 'JSONAsString',
@@ -118,8 +118,7 @@ WHERE op IN ('c', 'u', 'r', 'd');
 -- step_instances
 -- ============================================================
 CREATE TABLE IF NOT EXISTS step_instances_queue (raw String)
-ENGINE = Kafka SETTINGS
-    kafka_broker_list = 'kafka:9092',
+ENGINE = Kafka(cce_kafka) SETTINGS
     kafka_topic_list  = 'cce.public.step_instance',
     kafka_group_name  = 'clickhouse_step_instances',
     kafka_format      = 'JSONAsString',
@@ -152,8 +151,7 @@ WHERE op IN ('c', 'u', 'r', 'd');
 -- deviations
 -- ============================================================
 CREATE TABLE IF NOT EXISTS deviations_queue (raw String)
-ENGINE = Kafka SETTINGS
-    kafka_broker_list = 'kafka:9092',
+ENGINE = Kafka(cce_kafka) SETTINGS
     kafka_topic_list  = 'cce.public.deviation',
     kafka_group_name  = 'clickhouse_deviations',
     kafka_format      = 'JSONAsString',
@@ -178,8 +176,7 @@ WHERE op IN ('c', 'u', 'r', 'd');
 -- compliance_event_logs
 -- ============================================================
 CREATE TABLE IF NOT EXISTS compliance_event_logs_queue (raw String)
-ENGINE = Kafka SETTINGS
-    kafka_broker_list = 'kafka:9092',
+ENGINE = Kafka(cce_kafka) SETTINGS
     kafka_topic_list  = 'cce.public.compliance_event_log',
     kafka_group_name  = 'clickhouse_compliance_event_logs',
     kafka_format      = 'JSONAsString',
@@ -204,8 +201,7 @@ WHERE op IN ('c', 'u', 'r', 'd');
 -- action_definitions
 -- ============================================================
 CREATE TABLE IF NOT EXISTS action_definitions_queue (raw String)
-ENGINE = Kafka SETTINGS
-    kafka_broker_list = 'kafka:9092',
+ENGINE = Kafka(cce_kafka) SETTINGS
     kafka_topic_list  = 'cce.public.action_definition',
     kafka_group_name  = 'clickhouse_action_definitions',
     kafka_format      = 'JSONAsString',
@@ -234,8 +230,7 @@ WHERE op IN ('c', 'u', 'r', 'd');
 -- intelligence_event_logs  (event_payload excluded at the connector)
 -- ============================================================
 CREATE TABLE IF NOT EXISTS intelligence_event_logs_queue (raw String)
-ENGINE = Kafka SETTINGS
-    kafka_broker_list = 'kafka:9092',
+ENGINE = Kafka(cce_kafka) SETTINGS
     kafka_topic_list  = 'cce.public.intelligence_event_log',
     kafka_group_name  = 'clickhouse_intelligence_event_logs',
     kafka_format      = 'JSONAsString',
@@ -268,8 +263,7 @@ WHERE op IN ('c', 'u', 'r', 'd');
 -- http_status_code/error_message are MATERIALIZED from delivery_result, not inserted here)
 -- ============================================================
 CREATE TABLE IF NOT EXISTS intelligence_deliveries_queue (raw String)
-ENGINE = Kafka SETTINGS
-    kafka_broker_list = 'kafka:9092',
+ENGINE = Kafka(cce_kafka) SETTINGS
     kafka_topic_list  = 'cce.public.intelligence_delivery',
     kafka_group_name  = 'clickhouse_intelligence_deliveries',
     kafka_format      = 'JSONAsString',
