@@ -5,16 +5,15 @@
 1. [Prerequisites](#1-prerequisites)
 2. [Infrastructure Components](#2-infrastructure-components)
 3. [Docker Compose (Development)](#3-docker-compose-development)
-4. [Kubernetes (Production)](#4-kubernetes-production)
-5. [Bootstrap Order](#5-bootstrap-order)
-6. [Debezium Connector Setup](#6-debezium-connector-setup)
-7. [Schema Deployment](#7-schema-deployment)
-8. [Post-Deployment Validation](#8-post-deployment-validation)
-9. [Monitoring & Observability](#9-monitoring--observability)
-10. [Backfill & Replay](#10-backfill--replay)
-11. [Rollback Procedures](#11-rollback-procedures)
-12. [Operational Procedures](#12-operational-procedures)
-13. [Troubleshooting](#13-troubleshooting)
+4. [Bootstrap Order](#4-bootstrap-order)
+5. [Debezium Connector Setup](#5-debezium-connector-setup)
+6. [Schema Deployment](#6-schema-deployment)
+7. [Post-Deployment Validation](#7-post-deployment-validation)
+8. [Monitoring & Observability](#8-monitoring--observability)
+9. [Backfill & Replay](#9-backfill--replay)
+10. [Rollback Procedures](#10-rollback-procedures)
+11. [Operational Procedures](#11-operational-procedures)
+12. [Troubleshooting](#12-troubleshooting)
 
 ---
 
@@ -32,7 +31,7 @@
 - [ ] Kafka broker reachable from Kafka Connect + ClickHouse (platform cce-net)
 - [ ] Network connectivity verified between all services
 - [ ] DNS entries configured for Grafana (and the external `cce-insights-ui`)
-- [ ] Docker + Docker Compose v2 (development) or Kubernetes 1.28+ (production)
+- [ ] Docker + Docker Compose v2 (or the components run directly on the server)
 
 ### PostgreSQL Configuration
 ```sql
@@ -92,7 +91,7 @@ Single-node deployment with `ReplacingMergeTree(_version, _is_deleted)` tables (
 - **Ports:** 8123 (HTTP), 9000 (Native), 9363 (Prometheus metrics)
 - **Storage:** SSD recommended
 
-For resource sizing (dev vs prod), see [Architecture Overview § 8.3](architecture-overview.md#83-resource-requirements).
+For resource sizing (dev vs prod), see [Architecture Overview § 7.3](architecture-overview.md#73-resource-requirements).
 
 ### 2.2 Debezium on Kafka Connect
 
@@ -151,28 +150,7 @@ Prometheus/Grafana, insights apps) is provided by the platform stack on `cce-net
 
 ---
 
-## 4. Kubernetes (Production)
-
-### Namespace Layout
-```
-cce-analytics/   (this repo — joins the platform's Kafka/Postgres/monitoring)
-├── clickhouse (StatefulSet, 1 replica)
-└── kafka-connect (Deployment, Debezium source connector)
-```
-
-> Kafka, `ccedb`, Prometheus/Grafana, and `cce-insights-service`/`ui` are deployed by the
-> platform stack; this namespace only adds ClickHouse + the Connect worker, which need network
-> access to the platform's Kafka broker and `ccedb`.
-
-### Key K8s Resources
-- **PersistentVolumeClaims:** ClickHouse data (500 GB)
-- **ConfigMaps:** ClickHouse server config (`infra/clickhouse/`), Debezium connector JSON, schema SQL
-- **Secrets:** ClickHouse + CDC passwords, Kafka credentials
-- **Services:** ClusterIP for ClickHouse + Kafka Connect REST
-
----
-
-## 5. Bootstrap Order
+## 4. Bootstrap Order
 
 ```mermaid
 flowchart TD
@@ -190,7 +168,7 @@ flowchart TD
 
 ---
 
-## 6. Debezium Connector Setup
+## 5. Debezium Connector Setup
 
 The Debezium PostgreSQL source connector is registered on the Kafka Connect worker via its
 REST API (`:8083`). `register-connectors.sh` interpolates `${CDC_*}` from `.env` into
@@ -216,7 +194,7 @@ Per-topic detail: `${CONNECT_URL}/connectors/cce-ccedb-source/status` and **kafk
 
 ---
 
-## 7. Schema Deployment
+## 6. Schema Deployment
 
 Apply all schema files in order (idempotent). With Debezium + Kafka, **base tables and the
 Kafka-engine ingestion (schema/01–02) must exist before the connector starts** so the
@@ -242,7 +220,7 @@ $CH < schema/06-current-state-rollups.sql  # argMaxState current-state rollups (
 > `AggregatingMergeTree + argMaxState(col, _version)` dedups by version on read via `argMaxMerge()`
 > — incremental, correct, and live. Reports use a nested GROUP BY and filter `WHERE is_deleted = 0`.
 
-Then register the Debezium connector (§6) to start the snapshot.
+Then register the Debezium connector (§5) to start the snapshot.
 
 ### Validate Schema
 ```bash
@@ -251,7 +229,7 @@ Then register the Debezium connector (§6) to start the snapshot.
 
 ---
 
-## 9. Post-Deployment Validation
+## 7. Post-Deployment Validation
 
 ### Automated
 ```bash
@@ -274,7 +252,7 @@ Then register the Debezium connector (§6) to start the snapshot.
 
 ---
 
-## 10. Monitoring & Observability
+## 8. Monitoring & Observability
 
 ### Prometheus Metrics
 
@@ -331,7 +309,7 @@ Configure in Grafana → Alerting → Contact Points:
 
 ---
 
-## 10. Backfill & Replay
+## 9. Backfill & Replay
 
 ### Full Re-snapshot
 
@@ -355,7 +333,7 @@ full reset — configure a signaling table/topic and send a snapshot signal list
 
 ---
 
-## 11. Rollback Procedures
+## 10. Rollback Procedures
 
 ### Debezium Connector Rollback
 ```bash
@@ -385,7 +363,7 @@ docker compose up -d
 
 ---
 
-## 14. Operational Procedures
+## 11. Operational Procedures
 
 ### ClickHouse Maintenance
 ```bash
@@ -498,7 +476,7 @@ Safe procedures (pick one):
 
 ---
 
-## 13. Troubleshooting
+## 12. Troubleshooting
 
 ### Connector Not Starting / FAILED
 ```bash

@@ -14,7 +14,7 @@ The CCE Data Pipeline lands committed PostgreSQL data into ClickHouse via Change
 |----------|---------|--------------|
 | [Architecture Overview](architecture-overview.md) | System context, principles, technology decisions, component roles, capacity planning, security, failure modes | Architects, tech leads, DevOps |
 | [Data Flow & Schema Design](data-flow.md) | CDC pipeline config, ClickHouse DDL, MATERIALIZED columns, MV catalog, Entity × Behavior matrix, query patterns | Data engineers, backend developers |
-| [Deployment Guide](deployment-guide.md) | Prerequisites, Docker/K8s setup, connector registration, schema deployment, monitoring, validation, rollback, operational procedures, troubleshooting | DevOps, SRE, platform engineers |
+| [Deployment Guide](deployment-guide.md) | Prerequisites, Docker/server setup, connector registration, schema deployment, monitoring, validation, rollback, operational procedures, troubleshooting | DevOps, SRE, platform engineers |
 
 ---
 
