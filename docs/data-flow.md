@@ -84,12 +84,13 @@ A Debezium PostgreSQL connector on Kafka Connect reads the WAL via logical repli
 The 9 base tables are pre-created via `schema/01-create-tables.sql`; the consumer MVs
 (`schema/02`) insert into them.
 
-**Engine:** `ReplacingMergeTree(_version, _is_deleted)` with `SETTINGS clean_deleted_rows = 'Always'` (ClickHouse 23.2+).
+**Engine:** `ReplacingMergeTree(_version, _is_deleted)` with `SETTINGS clean_deleted_rows = 'Always', min_age_to_force_merge_seconds = 120` (ClickHouse 23.2+).
 
 **Deduplication strategy:**
 - `_version` = Debezium `source.lsn` (monotonic WAL position), derived per row by the consumer MV
 - ReplacingMergeTree keeps the highest-`_version` row per ORDER BY key (`id`); a winning row with `_is_deleted=1` is physically removed during background merges
 - **Queries use `FINAL`** (or the `argMaxState` rollups) when exact dedup is needed before merges complete
+- `min_age_to_force_merge_seconds = 120` force-merges settled parts (~2 min after the last new part), so dedup/delete-purge actually happen promptly and `FINAL` reads stay cheap — the size-based merge scheduler alone may never collapse small parts
 
 **Delete handling:**
 - The consumer MV sets `_is_deleted=1` when the Debezium `op='d'` (it reads the `before` image for the key columns)

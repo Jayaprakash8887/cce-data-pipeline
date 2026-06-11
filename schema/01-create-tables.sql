@@ -6,6 +6,9 @@
 --   - _version     Debezium source.lsn (monotonic) — ReplacingMergeTree dedup version
 --   - _is_deleted  1 when op='d' (PostgreSQL DELETE) — set by the consumer MV
 --   - clean_deleted_rows = 'Always' physically removes deleted rows during background merges
+--   - min_age_to_force_merge_seconds = 120 force-merges settled parts (no new part for ~2 min),
+--     so CDC dedup / delete-purge / roll-up actually happen promptly and FINAL reads stay cheap
+--     (dedup only occurs on merge; the size-based scheduler alone may never collapse small parts)
 --
 -- Execution order:
 --   1. Run this script:                     schema/01-create-tables.sql
@@ -63,7 +66,7 @@ CREATE TABLE IF NOT EXISTS inbound_event_logs
 ENGINE = ReplacingMergeTree(_version, _is_deleted)
 PARTITION BY toYYYYMM(received_at)
 ORDER BY (id)
-SETTINGS clean_deleted_rows = 'Always';
+SETTINGS clean_deleted_rows = 'Always', min_age_to_force_merge_seconds = 120;
 
 
 -- ============================================================
@@ -89,7 +92,7 @@ CREATE TABLE IF NOT EXISTS protocol_definitions
 )
 ENGINE = ReplacingMergeTree(_version, _is_deleted)
 ORDER BY (id)
-SETTINGS clean_deleted_rows = 'Always';
+SETTINGS clean_deleted_rows = 'Always', min_age_to_force_merge_seconds = 120;
 
 
 -- Patient enrollments in a protocol. One row per patient × protocol.
@@ -111,7 +114,7 @@ CREATE TABLE IF NOT EXISTS protocol_instances
 ENGINE = ReplacingMergeTree(_version, _is_deleted)
 PARTITION BY toYYYYMM(enrolled_at)
 ORDER BY (id)
-SETTINGS clean_deleted_rows = 'Always';
+SETTINGS clean_deleted_rows = 'Always', min_age_to_force_merge_seconds = 120;
 
 
 -- Individual action step occurrences within a protocol enrollment.
@@ -138,7 +141,7 @@ CREATE TABLE IF NOT EXISTS step_instances
 ENGINE = ReplacingMergeTree(_version, _is_deleted)
 PARTITION BY toYYYYMM(created_at)
 ORDER BY (id)
-SETTINGS clean_deleted_rows = 'Always';
+SETTINGS clean_deleted_rows = 'Always', min_age_to_force_merge_seconds = 120;
 
 
 -- Compliance gaps recorded when steps become overdue or missed.
@@ -157,7 +160,7 @@ CREATE TABLE IF NOT EXISTS deviations
 ENGINE = ReplacingMergeTree(_version, _is_deleted)
 PARTITION BY toYYYYMM(detected_at)
 ORDER BY (id)
-SETTINGS clean_deleted_rows = 'Always';
+SETTINGS clean_deleted_rows = 'Always', min_age_to_force_merge_seconds = 120;
 
 
 -- Idempotency log for inbound CloudEvents processed by the compliance service.
@@ -176,7 +179,7 @@ CREATE TABLE IF NOT EXISTS compliance_event_logs
 ENGINE = ReplacingMergeTree(_version, _is_deleted)
 PARTITION BY toYYYYMM(received_at)
 ORDER BY (id)
-SETTINGS clean_deleted_rows = 'Always';
+SETTINGS clean_deleted_rows = 'Always', min_age_to_force_merge_seconds = 120;
 
 
 -- FHIR ActivityDefinition resources defining intelligence actions.
@@ -199,7 +202,7 @@ CREATE TABLE IF NOT EXISTS action_definitions
 )
 ENGINE = ReplacingMergeTree(_version, _is_deleted)
 ORDER BY (id)
-SETTINGS clean_deleted_rows = 'Always';
+SETTINGS clean_deleted_rows = 'Always', min_age_to_force_merge_seconds = 120;
 
 
 -- Self-contained intelligence action execution records. No FK constraints by design
@@ -226,7 +229,7 @@ CREATE TABLE IF NOT EXISTS intelligence_event_logs
 ENGINE = ReplacingMergeTree(_version, _is_deleted)
 PARTITION BY toYYYYMM(created_at)
 ORDER BY (id)
-SETTINGS clean_deleted_rows = 'Always';
+SETTINGS clean_deleted_rows = 'Always', min_age_to_force_merge_seconds = 120;
 
 
 -- ============================================================
@@ -270,7 +273,7 @@ CREATE TABLE IF NOT EXISTS intelligence_deliveries
 ENGINE = ReplacingMergeTree(_version, _is_deleted)
 PARTITION BY toYYYYMM(created_at)
 ORDER BY (id)
-SETTINGS clean_deleted_rows = 'Always';
+SETTINGS clean_deleted_rows = 'Always', min_age_to_force_merge_seconds = 120;
 
 
 
