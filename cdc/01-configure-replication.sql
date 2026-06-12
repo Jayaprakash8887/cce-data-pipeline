@@ -7,17 +7,11 @@
 --
 -- Usage: psql -h <host> -U postgres -d ccedb -f cdc/01-configure-replication.sql
 
--- Step 1: Ensure wal_level is logical (requires restart if not already set)
-DO $$
-BEGIN
-    IF current_setting('wal_level') != 'logical' THEN
-        RAISE NOTICE 'wal_level is currently "%". Changing to "logical"...', current_setting('wal_level');
-        EXECUTE 'ALTER SYSTEM SET wal_level = ''logical''';
-        RAISE NOTICE 'wal_level changed. PostgreSQL RESTART REQUIRED for this to take effect.';
-    ELSE
-        RAISE NOTICE 'wal_level is already "logical". No restart needed.';
-    END IF;
-END $$;
+-- Step 1: Ensure wal_level is logical. A PostgreSQL RESTART is REQUIRED for this to take effect.
+-- NOTE: ALTER SYSTEM cannot run inside a DO block / function (Postgres raises
+-- "ALTER SYSTEM cannot be executed from a function"), so it must be a plain top-level statement.
+-- It is idempotent — re-running when already 'logical' is a no-op.
+ALTER SYSTEM SET wal_level = 'logical';
 
 -- Step 2: Set max_replication_slots (ensure enough for the Debezium slot + backup slots)
 ALTER SYSTEM SET max_replication_slots = 10;

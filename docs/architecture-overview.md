@@ -165,7 +165,7 @@ All 11 CDC tables reside in the shared `ccedb` database (columns reconciled agai
 - **Dictionaries** — Fast key-value lookups replacing JOINs (3 dictionaries, all using `QUERY...FINAL` sources)
 - **Bloom filter indexes** — 17 secondary indexes for fast point lookups on non-ORDER-BY columns (effective under `FINAL`)
 - **TTL** — 90-day hot retention on 4 high-volume log tables
-- **User profile** — `analytics` (readonly, `final=1` auto-applied) for `cce-insights-service` reads
+- **User profile** — `analytics` (readonly, `final=1`) is defined but NOT auto-assigned to the entrypoint-created `cce_pipeline`; analytics reads use explicit `FINAL` (or run `ALTER USER cce_pipeline SETTINGS PROFILE 'analytics'` to auto-apply)
 
 For full schema DDL, MV catalog, Entity × Behavior coverage matrix, and query patterns, see [Data Flow & Schema Design](data-flow.md).
 
@@ -175,7 +175,7 @@ Dashboards and UI are **not** part of this repo. The `cce-insights-service` back
 ClickHouse (HTTP 8123 or native 9000, user `cce_pipeline`) and `cce-insights-ui` renders the
 clinical views. Responsibilities that live in those apps:
 
-- **ClickHouse access** — via the `cce_pipeline` read-only user (`final=1` applied automatically)
+- **ClickHouse access** — via the `cce_pipeline` read-only user; analytics reads use explicit `FINAL`
 - **AuthN/AuthZ** — handled by the insights apps (e.g. Keycloak), not by this pipeline
 - **Facility/role scoping** — enforced in the service layer
 - **Bespoke clinical views** — patient detail, workflow timelines, source comparison, etc.

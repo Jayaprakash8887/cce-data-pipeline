@@ -27,7 +27,7 @@ services:
     container_name: cce-clickhouse
     ports:
       - "8123:8123"   # HTTP interface
-      - "9000:9000"   # Native protocol
+      - "${CH_NATIVE_PORT:-9000}:9000"   # Native protocol (host port configurable to avoid collisions, e.g. 9009)
       - "9363:9363"   # Prometheus metrics
     environment:
       CLICKHOUSE_DB: cce_analytics
@@ -44,7 +44,7 @@ services:
       # NOTE: schema is applied manually (see deployment-guide) rather than via
       # docker-entrypoint-initdb.d, because schema/02 Kafka-engine tables need the broker reachable.
     healthcheck:
-      test: ["CMD", "wget", "--spider", "-q", "http://localhost:8123/ping"]
+      test: ["CMD", "wget", "--spider", "-q", "http://127.0.0.1:8123/ping"]
       interval: 10s
       timeout: 5s
       retries: 5
@@ -75,7 +75,7 @@ services:
       VALUE_CONVERTER: org.apache.kafka.connect.json.JsonConverter
     networks: [cce-net]
     healthcheck:
-      test: ["CMD-SHELL", "curl -sf http://localhost:8083/ || exit 1"]
+      test: ["CMD-SHELL", "curl -sf http://127.0.0.1:8083/ || exit 1"]
       interval: 15s
       timeout: 5s
       retries: 10
