@@ -90,7 +90,7 @@ Dashboards/UI are **not** deployed by this repo. `cce-insights-service` + `cce-i
 (separate repos) connect to ClickHouse and serve the clinical views:
 
 - **ClickHouse connection:** host `clickhouse` (in-network) or the published host, HTTP `8123`
-  / native `9000`, database `cce_analytics`, user `cce_pipeline` (read-only, `final=1`)
+  / native `9000`, database `cce_analytics`, user `cce_pipeline` (read-only; analytics reads use explicit `FINAL`)
 - **AuthN/AuthZ (incl. Keycloak):** handled by `cce-insights-service`
 - **Query logic** lives in the `cce-insights-service` repo (targets the `schema/` defined here)
 
@@ -190,7 +190,7 @@ $CH < schema/06-current-state-rollups.sql  # argMaxState current-state rollups (
 ```
 
 > **Why current-state rollups (schema/06), not projections/count-MVs/refreshable MVs?**
-> Projections are skipped under `FINAL` (the `cce_pipeline` profile sets `final=1`); count-based
+> Projections are skipped under `FINAL` (analytics reads use `FINAL`); count-based
 > MVs on mutable tables double-count CDC UPDATEs; a refreshable MV would be stale.
 > `AggregatingMergeTree + argMaxState(col, _version)` dedups by version on read via `argMaxMerge()`
 > — incremental, correct, and live. Reports use a nested GROUP BY and filter `WHERE is_deleted = 0`.

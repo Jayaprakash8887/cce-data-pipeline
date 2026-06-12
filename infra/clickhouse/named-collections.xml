@@ -14,7 +14,10 @@
     -->
     <named_collections>
         <cce_kafka>
-            <kafka_broker_list from_env="KAFKA_BOOTSTRAP_SERVERS">kafka:9092</kafka_broker_list>
+            <!-- Must be self-closing: ClickHouse 26.3 rejects a `from_env` element that ALSO has
+                 inline text ("<kafka_broker_list> has value and does not have 'replace' attribute").
+                 The default lives in docker-compose (KAFKA_BOOTSTRAP_SERVERS:-kafka:9092). -->
+            <kafka_broker_list from_env="KAFKA_BOOTSTRAP_SERVERS"/>
         </cce_kafka>
     </named_collections>
 </clickhouse>

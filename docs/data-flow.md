@@ -99,7 +99,7 @@ The 9 base tables are pre-created via `schema/01-create-tables.sql`; the consume
 **Delete handling:**
 - The consumer MV sets `_is_deleted=1` when the Debezium `op='d'` (it reads the `before` image for the key columns)
 - `clean_deleted_rows = 'Always'` physically removes deleted rows on merge — no `WHERE _is_deleted = 0` filter needed for base-table `FINAL` reads (the `argMaxState` rollups do carry an explicit `is_deleted` guard)
-- The `cce_pipeline` user profile has `final=1` so reads automatically apply FINAL
+- Reads must apply `FINAL` **explicitly** (or use the `argMaxState` rollups). The `cce_pipeline` user runs on the default profile; the `analytics` profile carries `final=1` but is not auto-assigned to the entrypoint-created user (see `infra/clickhouse/users.xml`). To auto-apply FINAL instead, run `ALTER USER cce_pipeline SETTINGS PROFILE 'analytics'`.
 
 ### 2.3 Kafka Ingestion
 
@@ -333,7 +333,7 @@ ORDER BY total_events DESC;
 
 ### 5.1 Secondary Indexes
 
-17 bloom filter indexes for fast point lookups on non-ORDER-BY columns. All indexes are materialized via `MATERIALIZE INDEX` to cover existing snapshot data. **Skip indexes prune granules even under `FINAL`**, so they remain effective for the `cce_pipeline` profile (which sets `final=1`).
+17 bloom filter indexes for fast point lookups on non-ORDER-BY columns. All indexes are materialized via `MATERIALIZE INDEX` to cover existing snapshot data. **Skip indexes prune granules even under `FINAL`**, so they remain effective for the analytics reads (which use `FINAL`).
 
 | Table | Index | Column |
 |-------|-------|--------|
@@ -358,15 +358,15 @@ ORDER BY total_events DESC;
 ### 5.2 Why no projections
 
 This pipeline uses **no projections**. ClickHouse skips projections whenever a query uses
-`FINAL`, and the `cce_pipeline` analytics profile sets `final=1` — so projections would never
+`FINAL`, and analytics reads use `FINAL` explicitly — so projections would never
 be used by `cce-insights-service`, while each `SELECT *` projection costs a full extra sorted
 copy of the table (prohibitive on `inbound_event_logs`, which stores the large `raw_payload`
 blob). The access patterns a projection would serve are instead covered by the skip indexes
 above (which work under `FINAL`), and current-state compliance reads by the always-fresh
-`argMaxState` rollups in `schema/05` (see [Deployment Guide § Step 4](deployment-guide.md#step-4--current-state-rollups-recommended)).
+`argMaxState` rollups in `schema/06` (see [Deployment Guide § 6](deployment-guide.md#6-schema-deployment)).
 
 > If you later run heavy **non-FINAL** analytical scans under a different profile, projections
-> could help there — but they are intentionally omitted for the current `final=1` access path.
+> could help there — but they are intentionally omitted for the current `FINAL`-based access path.
 
 ---
 
