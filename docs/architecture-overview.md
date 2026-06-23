@@ -97,7 +97,7 @@ graph TB
 |-----------|----------------|----------------|-------|
 | Debezium | 2.4 (ReselectColumns) | 3.0.0.Final | On Kafka Connect; needs Kafka Connect 3.6+ for the offsets REST API |
 | Kafka | 3.5 | 7.6.1 (cp-kafka, KRaft) | Reused from the platform deploy |
-| ClickHouse | 23.2 | 26.3 LTS | 23.2+ for `clean_deleted_rows = 'Always'`; Kafka table engine built-in |
+| ClickHouse | 24.3 | 26.3 LTS | 24.3+ for Refreshable Materialized Views (schema/07); 23.2+ for `clean_deleted_rows = 'Always'`; Kafka table engine built-in |
 | PostgreSQL (source) | 14 | 16 | Existing CCE database (`ccedb`); `wal_level=logical`, REPLICA IDENTITY FULL |
 
 ### 3.3 Technology Decisions
@@ -159,7 +159,7 @@ All 11 CDC tables reside in the shared `ccedb` database (columns reconciled agai
 - **Kafka table engine** — consumes the Debezium topics directly; consumer MVs parse the envelope into base tables (no sink connector)
 - **ReplacingMergeTree(_version, _is_deleted)** — `clean_deleted_rows = 'Always'`: dedup by `_version` (`source.lsn`), physically removes deletes on merge
 - **MATERIALIZED columns** — Extract JSON fields from `raw_payload` at insert time (zero query cost), defined inline in table DDL
-- **Materialized Views** — 12 aggregation MVs on append-only sources; mutable entities served by the `argMaxState` current-state rollups or `FINAL`
+- **Materialized Views** — 12 aggregation MVs on append-only sources; 6 refreshable daily-summary MVs (APPEND mode, `ReplacingMergeTree` backing, schema/07); mutable entities served by the `argMaxState` current-state rollups or `FINAL`
 - **AggregatingMergeTree** — incremental aggregation with `-State`/`-Merge` (append-only sources) and `argMaxState` current-state rollups (mutable entities)
 - **SummingMergeTree** — Simple additive rollups (counts per hour/day)
 - **Dictionaries** — Fast key-value lookups replacing JOINs (3 dictionaries, all using `QUERY...FINAL` sources)
@@ -229,8 +229,10 @@ flowchart TD
 | **Event Volume** | Events by resource type, facility, source, practitioner | `inbound_event_logs` → `mv_event_volume_hourly/daily` |
 | **Facility Ranking** | Event volume, unique patients, unique practitioners per facility | `inbound_event_logs` → `mv_facility_summary` |
 | **Practitioner Activity** | Events per practitioner, patient coverage, resource types | `inbound_event_logs` → `mv_practitioner_summary` |
-| **Compliance** | Adherence rate, on-track/at-risk/non-compliant counts | `rollup_protocol_instance_current` + `rollup_step_current` (argMaxState, schema/06) — or base tables with `FINAL` |
-| **Deviations** | Overdue/missed counts, trends, by protocol/patient | `deviations` → `mv_deviation_trends`, `mv_deviation_by_protocol`, `mv_deviation_by_patient` |
+| **Compliance** | Adherence rate, enrollment status, step metrics, deviation breakdown per protocol/day | `rollup_protocol_instance_current` + `rollup_step_current` (argMaxState, schema/06) → `mv_daily_compliance_kpis` (schema/07) |
+| **Facility Activity** | Active/inactive facility counts, active facility rate — denominator from `facility_reference` (schema/08) | `mv_daily_facility_kpis` → `mv_daily_facility_activity_summary` (schema/07) |
+| **e-Buzima Adoption** | Actual vs expected patients per facility per day, adoption rate, reporting gap | `compliance_event_logs` + `facility_reference` (schema/08) → `mv_daily_adoption_kpis` (schema/07) |
+| **Deviations** | Overdue/missed counts, trends, by protocol/patient | `deviations` → `mv_deviation_trends`, `mv_deviation_by_protocol`, `mv_deviation_by_patient`; daily header cards via `mv_daily_deviation_kpis` (schema/07) |
 | **Ingestion Quality** | Acceptance rate, rejection reasons, source quality | `inbound_event_logs` → `mv_ingestion_quality` |
 | **Intelligence & Triggers** | Trigger volume by action type, destination, reason | `intelligence_event_logs` → `mv_intelligence_summary`, `mv_intelligence_by_patient/protocol` |
 | **Delivery Performance** | Success rate, latency, errors per adaptor/protocol | `intelligence_deliveries FINAL` (base table, ReplacingMergeTree) |
