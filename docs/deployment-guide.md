@@ -129,7 +129,7 @@ Prometheus/Grafana, insights apps) is provided by the platform stack on `cce-net
 
 ```mermaid
 flowchart TD
-    A["1. docker compose up (ClickHouse + Kafka Connect on cce-net)"] --> B["2. Apply ClickHouse schema (schema/01-06)"]
+    A["1. docker compose up (ClickHouse + Kafka Connect on cce-net)"] --> B["2. Apply ClickHouse schema (schema/01-06, schema/08, schema/07)"]
     B --> PG["3. Configure PG replication (cdc/01-configure-replication.sql) on ccedb"]
     PG --> C["4. register-connectors.sh (Debezium connector → initial snapshot)"]
     C --> D["5. Verify (check-connector-health.sh + validate-clickhouse.sh)"]
@@ -187,6 +187,8 @@ $CH < schema/03-create-materialized-views.sql
 $CH < schema/04-create-indexes.sql
 $CH < schema/05-create-dictionary.sql
 $CH < schema/06-current-state-rollups.sql  # argMaxState current-state rollups (recommended)
+$CH < schema/08-reference-tables.sql          # static facility reference list — must precede schema/07
+$CH < schema/07-daily-summary-aggregates.sql  # refreshable daily compliance/facility/dashboard snapshots (CH 24.3+)
 ```
 
 > **Why current-state rollups (schema/06), not projections/count-MVs/refreshable MVs?**
@@ -194,6 +196,25 @@ $CH < schema/06-current-state-rollups.sql  # argMaxState current-state rollups (
 > MVs on mutable tables double-count CDC UPDATEs; a refreshable MV would be stale.
 > `AggregatingMergeTree + argMaxState(col, _version)` dedups by version on read via `argMaxMerge()`
 > — incremental, correct, and live. Reports use a nested GROUP BY and filter `WHERE is_deleted = 0`.
+
+> **Why APPEND-mode refreshable MVs (schema/07)?**
+> Compliance status counts require current mutable state (not append-only inserts) — incremental
+> MVs on mutable tables double-count CDC UPDATE events. `REFRESH EVERY 30 MINUTE APPEND` inserts a
+> new snapshot row every 30 minutes without deleting prior snapshots. The backing tables use
+> `ReplacingMergeTree(refreshed_at)` with `(snapshot_date, <key>)` as ORDER BY — within the same
+> calendar day, multiple 30-min rows deduplicate to the latest via background merge (or FINAL at
+> query time); across days all snapshots are preserved permanently, enabling date-range queries.
+> `mv_daily_facility_activity_summary_mv` runs `DEPENDS ON mv_daily_facility_kpis_mv` to ensure it
+> always reads fresh facility data.
+> Trigger an initial fill immediately after applying:
+> ```sql
+> SYSTEM REFRESH VIEW mv_daily_compliance_kpis_mv;
+> SYSTEM REFRESH VIEW mv_daily_facility_kpis_mv;
+> SYSTEM REFRESH VIEW mv_daily_deviation_kpis_mv;
+> SYSTEM REFRESH VIEW mv_daily_event_kpis_mv;
+> SYSTEM REFRESH VIEW mv_daily_adoption_kpis_mv;
+> SYSTEM REFRESH VIEW mv_daily_facility_activity_summary_mv;  -- last: depends on facility_kpis
+> ```
 
 Then register the Debezium connector (§5) to start the snapshot.
 
@@ -219,7 +240,7 @@ Then register the Debezium connector (§5) to start the snapshot.
 |-------|---------|----------|
 | ClickHouse alive | `curl -s http://localhost:8123/ping` | `Ok.` |
 | Tables exist | `clickhouse-client -q "SELECT count() FROM system.tables WHERE database='cce_analytics'"` | `>= 9` |
-| MVs + consumer MVs exist | `clickhouse-client -q "SELECT count() FROM system.tables WHERE database='cce_analytics' AND engine='MaterializedView'"` | `>= 26` (12 aggregation + 11 consumer + 3 rollup) |
+| MVs + consumer MVs exist | `clickhouse-client -q "SELECT count() FROM system.tables WHERE database='cce_analytics' AND engine='MaterializedView'"` | `>= 32` (12 aggregation + 11 consumer + 3 rollup + 6 daily-summary) |
 | Kafka queues exist | `clickhouse-client -q "SELECT count() FROM system.tables WHERE database='cce_analytics' AND engine='Kafka'"` | `11` |
 | Data flowing | `clickhouse-client -q "SELECT count() FROM cce_analytics.inbound_event_logs"` | `> 0` after snapshot |
 | Debezium connector | `./scripts/check-connector-health.sh` | `HEALTHY` |
