@@ -356,18 +356,18 @@ FROM destination_adaptor_mapping_queue
 WHERE op IN ('c', 'u', 'r', 'd');
 
 -- ============================================================
--- facility_reference  (compliance service reference data)
+-- facility  (compliance service reference data)
 -- ============================================================
--- Auto-populated by FacilityReferenceService when facilities appear in inbound FHIR events.
+-- Auto-populated by FacilityService when facilities appear in inbound FHIR events.
 -- expected_patients_per_day is INTEGER (nullable) in source → JSONExtractUInt returns 0 for null.
-CREATE TABLE IF NOT EXISTS facility_reference_queue (raw String)
+CREATE TABLE IF NOT EXISTS facility_queue (raw String)
 ENGINE = Kafka(cce_kafka) SETTINGS
-    kafka_topic_list  = 'cce.public.facility_reference',
-    kafka_group_name  = 'clickhouse_facility_reference',
+    kafka_topic_list  = 'cce.public.facility',
+    kafka_group_name  = 'clickhouse_facility',
     kafka_format      = 'JSONAsString',
     kafka_num_consumers = 1;
 
-CREATE MATERIALIZED VIEW IF NOT EXISTS facility_reference_mv TO facility_reference AS
+CREATE MATERIALIZED VIEW IF NOT EXISTS facility_mv TO facility AS
 WITH
     JSONExtractString(raw, 'op') AS op,
     if(op = 'd', JSONExtractRaw(raw, 'before'), JSONExtractRaw(raw, 'after')) AS payload
@@ -380,5 +380,5 @@ SELECT
     parseDateTime64BestEffortOrZero(JSONExtractString(payload, 'updated_at'), 6)      AS updated_at,
     JSONExtractUInt(JSONExtractRaw(raw, 'source'), 'lsn')                             AS _version,
     if(op = 'd', 1, 0)                                                                AS _is_deleted
-FROM facility_reference_queue
+FROM facility_queue
 WHERE op IN ('c', 'u', 'r', 'd');

@@ -343,10 +343,10 @@ SETTINGS clean_deleted_rows = 'Always', min_age_to_force_merge_seconds = 120;
 -- Kafka consumer — no manual management needed once CDC is active.
 -- Used as denominator in facility activity rate and e-Buzima adoption KPI calculations.
 --
--- Prerequisites: public.facility_reference must be added to the PostgreSQL publication:
---   ALTER PUBLICATION cce_analytics_pub ADD TABLE public.facility_reference;
+-- Prerequisites: public.facility must be added to the PostgreSQL publication:
+--   ALTER PUBLICATION cce_analytics_pub ADD TABLE public.facility;
 --   (run once on PostgreSQL before registering the updated connector)
-CREATE TABLE IF NOT EXISTS facility_reference
+CREATE TABLE IF NOT EXISTS facility
 (
     id                        UUID,
     facility_id               String,    -- HIE-assigned facility identifier (UNIQUE in source)

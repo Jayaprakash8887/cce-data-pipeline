@@ -1,28 +1,28 @@
 -- CCE Analytics ClickHouse Schema — Reference Table CDC Setup
 -- Run: clickhouse-client --database cce_analytics < schema/08-reference-tables.sql
 --
--- facility_reference is now owned by the compliance service (cce-compliance-service).
+-- facility is now owned by the compliance service (cce-compliance-service).
 -- The table is defined in schema/01 and populated automatically via Debezium CDC:
 --
 --   PostgreSQL (compliance service)
---       V3__facility_reference.sql creates the table with REPLICA IDENTITY FULL
+--       V3__facility.sql creates the table with REPLICA IDENTITY FULL
 --       FacilityReferenceService.registerFacilityIfAbsent() inserts/updates rows
 --       ↓  Debezium CDC (WAL → Kafka)
---   Kafka topic: cce.public.facility_reference
---       ↓  facility_reference_queue + facility_reference_mv (schema/02)
---   ClickHouse: facility_reference (schema/01)
+--   Kafka topic: cce.public.facility
+--       ↓  facility_queue + facility_mv (schema/02)
+--   ClickHouse: facility (schema/01)
 --
 -- ONE-TIME SETUP (run on PostgreSQL before registering the updated connector):
---   ALTER PUBLICATION cce_analytics_pub ADD TABLE public.facility_reference;
+--   ALTER PUBLICATION cce_analytics_pub ADD TABLE public.facility;
 --
 -- The Debezium connector (connectors/debezium-postgres-source.json) already includes
--- public.facility_reference in table.include.list. On first connector start after the
+-- public.facility in table.include.list. On first connector start after the
 -- publication is updated, Debezium performs an initial snapshot that seeds all existing
 -- rows into ClickHouse, then streams live changes (INSERT/UPDATE/DELETE) going forward.
 --
 -- VERIFY CDC is flowing:
 --   -- On ClickHouse: check rows arrived
---   SELECT count(), max(updated_at) FROM cce_analytics.facility_reference FINAL;
+--   SELECT count(), max(updated_at) FROM cce_analytics.facility FINAL;
 --
 --   -- On ClickHouse: check consumer lag (should be 0 after snapshot)
 --   SELECT * FROM system.kafka_consumers WHERE database = 'cce_analytics';
