@@ -413,7 +413,11 @@ SELECT
     coalesce(toFloat32(round(
         countIf(fk.event_count > 0) / nullIf(count(), 0) * 100, 1
     )), 0.0)                                                                          AS active_facility_rate_pct
-FROM facility AS fr FINAL
+FROM (
+    SELECT facility_id
+    FROM cce_analytics.facility
+    WHERE _is_deleted = 0
+) AS fr
 LEFT JOIN mv_daily_facility_kpis fk
        ON fr.facility_id = fk.facility_id
       AND fk.snapshot_date = toDate(now());   -- join only today's facility kpis rows
@@ -574,31 +578,27 @@ CREATE MATERIALIZED VIEW IF NOT EXISTS mv_daily_adoption_kpis_mv
 REFRESH EVERY 30 MINUTE APPEND
 TO mv_daily_adoption_kpis
 AS
-WITH
-actual_today AS (
-    -- Unique patients per facility today from the pre-aggregated facility summary.
-    -- uniqMerge reads the AggregateFunction(uniq, String) partial states stored in the MV.
-    SELECT
-        facility_id,
-        toUInt32(uniqMerge(unique_patients)) AS actual_patients
-    FROM mv_facility_summary
-    WHERE toDate(day) = toDate(now())
-      AND facility_id != ''
-    GROUP BY facility_id
-)
 SELECT
     toDate(now())                                                                          AS snapshot_date,
     now64(3)                                                                               AS refreshed_at,
     fr.facility_id,
     fr.facility_name,
     fr.expected_patients_per_day,
-    coalesce(at.actual_patients, 0)                                                        AS actual_patients,
+    toUInt32(uniq(iel.subject))                                                            AS actual_patients,
     coalesce(toFloat32(round(
-        coalesce(at.actual_patients, 0) / nullIf(fr.expected_patients_per_day, 0) * 100, 1
+        toUInt32(uniq(iel.subject)) / nullIf(toFloat64(fr.expected_patients_per_day), 0) * 100, 1
     )), 0.0)                                                                               AS adoption_rate_pct,
-    toInt64(fr.expected_patients_per_day) - toInt64(coalesce(at.actual_patients, 0))      AS reporting_gap
-FROM facility AS fr FINAL
-LEFT JOIN actual_today at ON fr.facility_id = at.facility_id;
+    toInt64(fr.expected_patients_per_day) - toInt64(toUInt32(uniq(iel.subject)))          AS reporting_gap
+FROM (
+    SELECT facility_id, facility_name, expected_patients_per_day
+    FROM cce_analytics.facility
+    WHERE _is_deleted = 0
+) AS fr
+LEFT JOIN cce_analytics.inbound_event_logs AS iel
+       ON iel.facility_id = fr.facility_id
+      AND toDate(iel.received_at) = toDate(now())
+      AND iel.status = 'ACCEPTED'
+GROUP BY fr.facility_id, fr.facility_name, fr.expected_patients_per_day;
 
 
 -- ============================================================
