@@ -230,8 +230,8 @@ flowchart TD
 | **Facility Ranking** | Event volume, unique patients, unique practitioners per facility | `inbound_event_logs` → `mv_facility_summary` |
 | **Practitioner Activity** | Events per practitioner, patient coverage, resource types | `inbound_event_logs` → `mv_practitioner_summary` |
 | **Compliance** | Adherence rate, enrollment status, step metrics, deviation breakdown per protocol/day | `rollup_protocol_instance_current` + `rollup_step_current` (argMaxState, schema/06) → `mv_daily_compliance_kpis` (schema/07) |
-| **Facility Activity** | Active/inactive facility counts, active facility rate — denominator from `facility_reference` (schema/08) | `mv_daily_facility_kpis` → `mv_daily_facility_activity_summary` (schema/07) |
-| **e-Buzima Adoption** | Actual vs expected patients per facility per day, adoption rate, reporting gap | `compliance_event_logs` + `facility_reference` (schema/08) → `mv_daily_adoption_kpis` (schema/07) |
+| **Facility Activity** | Active/inactive facility counts, active facility rate — denominator from `facility` (schema/08) | `mv_daily_facility_kpis` → `mv_daily_facility_activity_summary` (schema/07) |
+| **e-Buzima Adoption** | Actual vs expected patients per facility per day, adoption rate, reporting gap | `compliance_event_logs` + `facility` (schema/08) → `mv_daily_adoption_kpis` (schema/07) |
 | **Deviations** | Overdue/missed counts, trends, by protocol/patient | `deviations` → `mv_deviation_trends`, `mv_deviation_by_protocol`, `mv_deviation_by_patient`; daily header cards via `mv_daily_deviation_kpis` (schema/07) |
 | **Ingestion Quality** | Acceptance rate, rejection reasons, source quality | `inbound_event_logs` → `mv_ingestion_quality` |
 | **Intelligence & Triggers** | Trigger volume by action type, destination, reason | `intelligence_event_logs` → `mv_intelligence_summary`, `mv_intelligence_by_patient/protocol` |
