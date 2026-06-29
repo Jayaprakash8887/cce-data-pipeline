@@ -50,14 +50,15 @@ GRANT SELECT ON TABLE
     step_instance_history
 TO cce_cdc_user;
 
--- Step 5: REPLICA IDENTITY FULL on all 14 tables
+-- Step 5: REPLICA IDENTITY FULL on all 14 CDC tables (uniform)
 -- Required by Debezium so UPDATE/DELETE events include the full old-row image
 -- (and so ReselectColumns / TOAST reconstruction can recover unchanged large values).
 -- Without this, only the primary key is available in the WAL for changed rows.
 -- facility sets this in its Flyway migration (V3__facility.sql) — listed here for
--- completeness (ALTER is idempotent). The two *_history tables are append-only (INSERT
--- only), so the default PK-based identity already suffices; FULL is applied here only for
--- convention/consistency, and is set ONLY here (their V4 migration does not set it).
+-- completeness (ALTER is idempotent).
+-- NOTE: the two *_history tables are append-only (INSERT only), so FULL is a harmless no-op for
+-- them (the default PK identity would also suffice) — applied here for uniformity so every CDC
+-- table follows the same rule. Their V4 migration does not set it; it is set here only.
 ALTER TABLE protocol_definition          REPLICA IDENTITY FULL;
 ALTER TABLE protocol_instance            REPLICA IDENTITY FULL;
 ALTER TABLE step_instance                REPLICA IDENTITY FULL;
