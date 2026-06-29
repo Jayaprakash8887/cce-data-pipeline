@@ -329,7 +329,7 @@ the insights apps are provided by the platform stack).
 | Kafka down (platform) | No new change events; slot holds WAL | Resolve on the platform; Debezium + ClickHouse resume from offsets |
 | insights-service/ui down | Dashboards unavailable (external app) | No pipeline/data impact; handled in that deployment |
 | PostgreSQL replication slot dropped | Full re-snapshot required | `./scripts/resnapshot-mirror.sh` (reset offsets + drop slot + truncate + resume) |
-| Full re-snapshot loses past daily-MV rows | The schema/07 refreshable MVs only resume from *today*; historical `snapshot_date` rows are gone | Run `schema/09-historical-backfill.sql` (manual, with a date range) to rebuild past days from `protocol_instance_history` + `step_instance_history` + append-only sources. Coverage is limited to dates after the V4 triggers were deployed. |
+| Full re-snapshot loses past daily-MV rows | The schema/07 refreshable MVs only resume from *today*; historical `snapshot_date` rows are gone | Run `schema/09-historical-backfill.sql` (manual, with a date range) to rebuild past days from `protocol_instance_history` + `step_instance_history` + append-only sources. The backfill joins the base `protocol_instances`/`step_instances` tables to recover `protocol_definition_id`/`protocol_instance_id` (no longer denormalized on the history rows), so hard-deleted instances are excluded. Coverage is limited to dates after application-level history capture began. |
 
 **Key invariant:** The data pipeline is a **read-only observer**. Its failure never impacts CCE operational services.
 
