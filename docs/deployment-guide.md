@@ -189,6 +189,9 @@ $CH < schema/05-create-dictionary.sql
 $CH < schema/06-current-state-rollups.sql  # argMaxState current-state rollups (recommended)
 $CH < schema/08-reference-tables.sql          # static facility reference list — must precede schema/07
 $CH < schema/07-daily-summary-aggregates.sql  # refreshable daily compliance/facility/dashboard snapshots (CH 24.3+)
+# NOTE: schema/09-historical-backfill.sql is intentionally NOT applied here. It is a manual,
+#       parameterised (--param_from_date/--param_to_date) reconstruction of past daily-MV rows,
+#       run ONLY after a full re-snapshot. See deploy-scripts docs/state-history-deployment.md (Step 6).
 ```
 
 > **Why current-state rollups (schema/06), not projections/count-MVs/refreshable MVs?**
