@@ -31,7 +31,7 @@ BEGIN
     END IF;
 END $$;
 
--- Step 4: Grant SELECT on all 12 CDC source tables
+-- Step 4: Grant SELECT on all 14 CDC source tables
 GRANT USAGE ON SCHEMA public TO cce_cdc_user;
 GRANT SELECT ON TABLE
     protocol_definition,
@@ -45,15 +45,19 @@ GRANT SELECT ON TABLE
     compliance_event_log,
     receiver_adaptor,
     destination_adaptor_mapping,
-    facility
+    facility,
+    protocol_instance_history,
+    step_instance_history
 TO cce_cdc_user;
 
--- Step 5: REPLICA IDENTITY FULL on all 12 tables
+-- Step 5: REPLICA IDENTITY FULL on all 14 tables
 -- Required by Debezium so UPDATE/DELETE events include the full old-row image
 -- (and so ReselectColumns / TOAST reconstruction can recover unchanged large values).
 -- Without this, only the primary key is available in the WAL for changed rows.
--- facility sets this in its Flyway migration (V3__facility.sql) but listed here
--- for completeness — ALTER is idempotent.
+-- facility sets this in its Flyway migration (V3__facility.sql) — listed here for
+-- completeness (ALTER is idempotent). The two *_history tables are append-only (INSERT
+-- only), so the default PK-based identity already suffices; FULL is applied here only for
+-- convention/consistency, and is set ONLY here (their V4 migration does not set it).
 ALTER TABLE protocol_definition          REPLICA IDENTITY FULL;
 ALTER TABLE protocol_instance            REPLICA IDENTITY FULL;
 ALTER TABLE step_instance                REPLICA IDENTITY FULL;
@@ -66,8 +70,10 @@ ALTER TABLE compliance_event_log         REPLICA IDENTITY FULL;
 ALTER TABLE receiver_adaptor             REPLICA IDENTITY FULL;
 ALTER TABLE destination_adaptor_mapping  REPLICA IDENTITY FULL;
 ALTER TABLE facility                     REPLICA IDENTITY FULL;
+ALTER TABLE protocol_instance_history    REPLICA IDENTITY FULL;
+ALTER TABLE step_instance_history        REPLICA IDENTITY FULL;
 
--- Step 6: Create publication for all 12 CDC tables
+-- Step 6: Create publication for all 14 CDC tables
 DROP PUBLICATION IF EXISTS cce_analytics_pub;
 CREATE PUBLICATION cce_analytics_pub FOR TABLE
     protocol_definition,
@@ -81,7 +87,9 @@ CREATE PUBLICATION cce_analytics_pub FOR TABLE
     compliance_event_log,
     receiver_adaptor,
     destination_adaptor_mapping,
-    facility;
+    facility,
+    protocol_instance_history,
+    step_instance_history;
 
 -- Step 7: Confirm replication role
 ALTER ROLE cce_cdc_user WITH REPLICATION;
