@@ -243,8 +243,9 @@ flowchart TD
 > **Why the history tables exist:** `protocol_instance.status` and `step_instance.state` are
 > UPDATE-in-place — the prior value is overwritten, so the current-state rollups (schema/06)
 > and the refreshable daily MVs (schema/07) can only ever snapshot *today*. The append-only
-> `*_history` tables (populated by triggers in the compliance service, Flyway `V4__state_history.sql`)
-> record every transition with its timestamp, making the daily MVs reconstructible for past
+> `*_history` tables (populated by the compliance service at the application layer — `StateTransitionHistoryService`,
+> Flyway `V4__state_history.sql` creates the tables) record every transition with its timestamp,
+> making the daily MVs reconstructible for past
 > dates after a full re-snapshot. They are inputs to **backfill only** — normal forward operation
 > never reads them.
 
@@ -328,7 +329,7 @@ the insights apps are provided by the platform stack).
 | Kafka down (platform) | No new change events; slot holds WAL | Resolve on the platform; Debezium + ClickHouse resume from offsets |
 | insights-service/ui down | Dashboards unavailable (external app) | No pipeline/data impact; handled in that deployment |
 | PostgreSQL replication slot dropped | Full re-snapshot required | `./scripts/resnapshot-mirror.sh` (reset offsets + drop slot + truncate + resume) |
-| Full re-snapshot loses past daily-MV rows | The schema/07 refreshable MVs only resume from *today*; historical `snapshot_date` rows are gone | Run `schema/09-historical-backfill.sql` (manual, with a date range) to rebuild past days from `protocol_instance_history` + `step_instance_history` + append-only sources. Coverage is limited to dates after the V4 triggers were deployed. |
+| Full re-snapshot loses past daily-MV rows | The schema/07 refreshable MVs only resume from *today*; historical `snapshot_date` rows are gone | Run `schema/09-historical-backfill.sql` (manual, with a date range) to rebuild past days from `protocol_instance_history` + `step_instance_history` + append-only sources. The backfill joins the base `protocol_instances`/`step_instances` tables to recover `protocol_definition_id`/`protocol_instance_id` (no longer denormalized on the history rows), so hard-deleted instances are excluded. Coverage is limited to dates after application-level history capture began. |
 
 **Key invariant:** The data pipeline is a **read-only observer**. Its failure never impacts CCE operational services.
 
@@ -376,7 +377,7 @@ The pipeline is designed for forward-compatible evolution without downtime:
 | PostgreSQL table gains a column | Debezium captures it in the envelope | `ALTER TABLE ADD COLUMN` on ClickHouse + extend the consumer MV in schema/02 |
 | PostgreSQL table dropped/renamed | Connector errors on missing table | Update `table.include.list` in `connectors/debezium-postgres-source.json` |
 | New PostgreSQL table needed | Add CDC capture | Add to `table.include.list` + base table (schema/01) + queue/consumer MV (schema/02) |
-| A mutable status/state column must become point-in-time | UPDATE-in-place overwrites history | Add an append-only `*_history` table + AFTER INSERT OR UPDATE trigger in the owning service (pattern: compliance `V4__state_history.sql`); CDC it like any table. Triggers are not retroactive — seed from current state. |
+| A mutable status/state column must become point-in-time | UPDATE-in-place overwrites history | Add an append-only `*_history` table, written by the owning service at each transition in the same transaction as the change (pattern: compliance `V4__state_history.sql` + `StateTransitionHistoryService`); CDC it like any table. Capture is forward-only — seed from current state to cover pre-existing rows. |
 
 **Key invariant:** The `raw_payload` column in `inbound_event_logs` stores the full CloudEvent (including FHIR resource) as-is. Any new field extraction is a non-breaking addition — historical data can always be backfilled from `raw_payload` using ClickHouse's JSON functions.
 
