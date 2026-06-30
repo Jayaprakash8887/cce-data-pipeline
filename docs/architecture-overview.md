@@ -145,7 +145,7 @@ the apps own presentation and query ClickHouse via the `cce_pipeline` user.
 
 A **Debezium PostgreSQL source connector** (on a Kafka Connect worker, `pgoutput` plugin) reads `ccedb`'s WAL and publishes JSON change events to Kafka topics `cce.public.<table>`. **ClickHouse ingests Kafka directly**: per source table there is a Kafka-engine "queue" table and a consumer MV (`schema/02-kafka-ingestion.sql`) that parses the Debezium envelope and inserts the flat row into the `ReplacingMergeTree(_version, _is_deleted)` base table (`schema/01`). There is **no ClickHouse sink connector and no S3 staging**.
 
-All 11 CDC tables reside in the shared `ccedb` database (columns reconciled against the live schema). The connector excludes two large unused JSONB columns (`intelligence_event_log.event_payload`, `intelligence_delivery.fhir_payload`); `receiver_adaptor` + `destination_adaptor_mapping` **are** captured (they hold adaptor name/endpoint/routing, which is not denormalized onto `intelligence_delivery`). For the full table listing, connector config, and the envelope-parsing details, see [Data Flow & Schema Design](data-flow.md).
+All 14 CDC tables reside in the shared `ccedb` database (columns reconciled against the live schema). The connector excludes two large unused JSONB columns (`intelligence_event_log.event_payload`, `intelligence_delivery.fhir_payload`); `receiver_adaptor` + `destination_adaptor_mapping` **are** captured (they hold adaptor name/endpoint/routing, which is not denormalized onto `intelligence_delivery`). `facility` is now CDC'd from the compliance service (no longer a static reference list), and the two append-only `*_history` tables are captured for backfill. For the full table listing, connector config, and the envelope-parsing details, see [Data Flow & Schema Design](data-flow.md).
 
 **CDC-metadata columns** (derived by the consumer MV from the Debezium envelope):
 - `_version` — Debezium `source.lsn` (monotonic WAL position) → ReplacingMergeTree dedup version
@@ -162,7 +162,7 @@ All 11 CDC tables reside in the shared `ccedb` database (columns reconciled agai
 - **Materialized Views** — 12 aggregation MVs on append-only sources; 6 refreshable daily-summary MVs (APPEND mode, `ReplacingMergeTree` backing, schema/07); mutable entities served by the `argMaxState` current-state rollups or `FINAL`
 - **AggregatingMergeTree** — incremental aggregation with `-State`/`-Merge` (append-only sources) and `argMaxState` current-state rollups (mutable entities)
 - **SummingMergeTree** — Simple additive rollups (counts per hour/day)
-- **Dictionaries** — Fast key-value lookups replacing JOINs (3 dictionaries, all using `QUERY...FINAL` sources)
+- **Dictionaries** — Fast key-value lookups replacing JOINs (4 dictionaries; the `QUERY...FINAL` sources avoid duplicate rows from unmerged parts — `dict_patient_facility` instead dedups via `argMax` GROUP BY)
 - **Bloom filter indexes** — 17 secondary indexes for fast point lookups on non-ORDER-BY columns (effective under `FINAL`)
 - **TTL** — 90-day hot retention on 4 high-volume log tables
 - **User profile** — `analytics` (readonly, `final=1`) is defined but NOT auto-assigned to the entrypoint-created `cce_pipeline`; analytics reads use explicit `FINAL` (or run `ALTER USER cce_pipeline SETTINGS PROFILE 'analytics'` to auto-apply)
@@ -230,8 +230,8 @@ flowchart TD
 | **Facility Ranking** | Event volume, unique patients, unique practitioners per facility | `inbound_event_logs` → `mv_facility_summary` |
 | **Practitioner Activity** | Events per practitioner, patient coverage, resource types | `inbound_event_logs` → `mv_practitioner_summary` |
 | **Compliance** | Adherence rate, enrollment status, step metrics, deviation breakdown per protocol/day | `rollup_protocol_instance_current` + `rollup_step_current` (argMaxState, schema/06) → `mv_daily_compliance_kpis` (schema/07) |
-| **Facility Activity** | Active/inactive facility counts, active facility rate — denominator from `facility` (schema/08) | `mv_daily_facility_kpis` → `mv_daily_facility_activity_summary` (schema/07) |
-| **e-Buzima Adoption** | Actual vs expected patients per facility per day, adoption rate, reporting gap | `compliance_event_logs` + `facility` (schema/08) → `mv_daily_adoption_kpis` (schema/07) |
+| **Facility Activity** | Active/inactive facility counts, active facility rate — denominator from `facility` (CDC'd, schema/01) | `mv_daily_facility_kpis` → `mv_daily_facility_activity_summary` (schema/07) |
+| **e-Buzima Adoption** | Actual vs expected patients per facility per day, adoption rate, reporting gap | `compliance_event_logs` + `facility` (CDC'd, schema/01) → `mv_daily_adoption_kpis` (schema/07) |
 | **Deviations** | Overdue/missed counts, trends, by protocol/patient | `deviations` → `mv_deviation_trends`, `mv_deviation_by_protocol`, `mv_deviation_by_patient`; daily header cards via `mv_daily_deviation_kpis` (schema/07) |
 | **Ingestion Quality** | Acceptance rate, rejection reasons, source quality | `inbound_event_logs` → `mv_ingestion_quality` |
 | **Intelligence & Triggers** | Trigger volume by action type, destination, reason | `intelligence_event_logs` → `mv_intelligence_summary`, `mv_intelligence_by_patient/protocol` |

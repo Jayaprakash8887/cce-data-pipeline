@@ -58,7 +58,7 @@ A Debezium PostgreSQL connector on Kafka Connect reads the WAL via logical repli
 - Topic prefix: `cce` · Snapshot mode: `initial`
 - Converters: JSON, schemas disabled (no Schema Registry)
 - `tombstones.on.delete=false` (deletes carried as `op='d'`)
-- **ReselectColumns** post-processor re-reads unchanged large JSONB (`raw_payload`, `definition`) from the source so they never arrive as the `__debezium_unavailable_value` placeholder
+- **ReselectColumns** post-processor re-reads unchanged large JSONB (`inbound_event_log.raw_payload`, `protocol_definition.definition`, `action_definition.definition`, `intelligence_delivery.delivery_result`, `intelligence_event_log.evaluation_context`, `receiver_adaptor.definition`/`config`) from the source so they never arrive as the `__debezium_unavailable_value` placeholder
 - Excluded columns: `intelligence_event_log.event_payload`, `intelligence_delivery.fhir_payload`
 
 **Source Tables (all from shared `ccedb` database):**
@@ -69,23 +69,30 @@ A Debezium PostgreSQL connector on Kafka Connect reads the WAL via logical repli
 | Compliance Service | `protocol_definition` | `protocol_definitions` |
 | Compliance Service | `protocol_instance` | `protocol_instances` |
 | Compliance Service | `step_instance` | `step_instances` |
+| Compliance Service | `protocol_instance_history` | `protocol_instance_history` |
+| Compliance Service | `step_instance_history` | `step_instance_history` |
 | Compliance Service | `deviation` | `deviations` |
 | Compliance Service | `intelligence_event_log` | `intelligence_event_logs` |
 | Compliance Service | `action_definition` | `action_definitions` |
 | Compliance Service | `compliance_event_log` | `compliance_event_logs` |
+| Compliance Service | `facility` | `facility` |
 | Intelligence Service | `intelligence_delivery` | `intelligence_deliveries` |
 | Intelligence Service | `receiver_adaptor` | `receiver_adaptor` |
 | Intelligence Service | `destination_adaptor_mapping` | `destination_adaptor_mapping` |
 
-> **Note:** All CCE services share a single PostgreSQL database (`ccedb`). `REPLICA IDENTITY FULL` is set on all 11 tables so TOAST'd JSONB columns are fully replicated during UPDATEs. Column names/types are reconciled against the **live** `ccedb` schema.
+> **Note:** All CCE services share a single PostgreSQL database (`ccedb`). `REPLICA IDENTITY FULL` is set on all 14 tables so TOAST'd JSONB columns are fully replicated during UPDATEs. Column names/types are reconciled against the **live** `ccedb` schema.
 >
 > **Adaptor tables:** `receiver_adaptor` + `destination_adaptor_mapping` are captured (the adaptor name/endpoint/routing is **not** denormalized onto `intelligence_delivery`); resolve delivery → adaptor via `dict_delivery_adaptor` (schema/05).
+>
+> **`facility`** is now owned by the compliance service (`FacilityReferenceService`, Flyway `V3__facility.sql`) and CDC'd like any other table — it is **no longer** a static reference list loaded by SQL. schema/08 is now documentation-only; the table DDL lives in schema/01 and its Kafka consumer objects in schema/02.
+>
+> **History tables:** `protocol_instance_history` + `step_instance_history` are append-only transition logs (Flyway `V4__state_history.sql`, written by `StateTransitionHistoryService`). They are CDC'd forward but read **only** by the schema/09 backfill — normal forward operation never queries them (see [Architecture Overview § 6](architecture-overview.md#6-data-domains)).
 >
 > **Excluded columns:** two large unused JSONB columns are dropped at the connector — `intelligence_event_log.event_payload` and `intelligence_delivery.fhir_payload`.
 
 ### 2.2 Deduplication & Delete Handling
 
-The 9 base tables are pre-created via `schema/01-create-tables.sql`; the consumer MVs
+The 14 base tables are pre-created via `schema/01-create-tables.sql`; the consumer MVs
 (`schema/02`) insert into them.
 
 **Engine:** `ReplacingMergeTree(_version, _is_deleted)` with `SETTINGS clean_deleted_rows = 'Always', min_age_to_force_merge_seconds = 120` (ClickHouse 23.2+).
@@ -130,8 +137,10 @@ Notes:
 |----------|--------|--------|---------|
 | Event logs | `inbound_event_logs`, `compliance_event_logs` | ReplacingMergeTree | Raw event audit trail |
 | Domain entities | `protocol_instances`, `step_instances`, `deviations` | ReplacingMergeTree | Protocol lifecycle |
+| State history | `protocol_instance_history`, `step_instance_history` | ReplacingMergeTree (append-only) | Point-in-time transition logs; backfill-only input (schema/09) |
 | Intelligence | `intelligence_event_logs`, `intelligence_deliveries` | ReplacingMergeTree | Trigger & delivery audit |
-| Reference data | `protocol_definitions`, `action_definitions` | ReplacingMergeTree | Lookup/dimension tables |
+| Reference data | `protocol_definitions`, `action_definitions`, `facility` | ReplacingMergeTree | Lookup/dimension tables (`facility` CDC'd from the compliance service) |
+| Adaptor routing | `receiver_adaptor`, `destination_adaptor_mapping` | ReplacingMergeTree | Delivery adaptor name/endpoint/routing |
 
 ### 3.2 MATERIALIZED Columns (Field Extraction)
 
@@ -435,6 +444,27 @@ SOURCE(CLICKHOUSE(
     DB 'cce_analytics'
 ))
 LIFETIME(MIN 60 MAX 300)
+LAYOUT(HASHED());
+```
+
+### `dict_delivery_adaptor`
+
+Resolves a delivery's `destination_adaptor_mapping_id` → adaptor name/endpoint/status by joining `destination_adaptor_mapping` to `receiver_adaptor` (the routing is **not** denormalized onto `intelligence_delivery`). Both sources read `FINAL` for the same dedup reason as above.
+
+```sql
+CREATE DICTIONARY dict_delivery_adaptor (
+    destination_adaptor_mapping_id UUID,
+    destination    String,
+    adaptor_name   String,
+    endpoint_url   String,
+    adaptor_status String
+)
+PRIMARY KEY destination_adaptor_mapping_id
+SOURCE(CLICKHOUSE(
+    QUERY 'SELECT m.id AS destination_adaptor_mapping_id, m.destination, r.name AS adaptor_name, r.endpoint_url, r.status AS adaptor_status FROM cce_analytics.destination_adaptor_mapping AS m FINAL INNER JOIN cce_analytics.receiver_adaptor AS r FINAL ON m.receiver_adaptor_id = r.id'
+    DB 'cce_analytics'
+))
+LIFETIME(MIN 300 MAX 600)
 LAYOUT(HASHED());
 ```
 
