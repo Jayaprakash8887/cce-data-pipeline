@@ -35,8 +35,9 @@ set -a; source .env; set +a
 # Start ClickHouse + Kafka Connect (joins the shared cce-net)
 docker compose up -d
 
-# 1. ClickHouse schema: base tables, Kafka-engine queues + consumer MVs, aggregation MVs, indexes, dicts, rollups
-for f in schema/0*.sql; do clickhouse-client --database cce_analytics --multiquery < "$f"; done
+# 1. ClickHouse schema: base tables, Kafka-engine queues + consumer MVs, aggregation MVs, indexes, dicts, rollups, daily-summary MVs
+# (schema/09 is a manual, parameterised backfill — intentionally excluded from the apply loop)
+for f in schema/0[1-8]*.sql; do clickhouse-client --database cce_analytics --multiquery < "$f"; done
 
 # 2. Configure logical replication on the source ccedb (publication + REPLICA IDENTITY FULL)
 psql -h "$CDC_PG_HOST" -U postgres -d "$CDC_PG_DATABASE" -f cdc/01-configure-replication.sql
@@ -55,7 +56,7 @@ psql -h "$CDC_PG_HOST" -U postgres -d "$CDC_PG_DATABASE" -f cdc/01-configure-rep
 
 ## CDC Tables
 
-Change Data Capture from committed PostgreSQL records (shared `ccedb`). **11 tables** captured from 3 services (Collector, Compliance, Intelligence) → ClickHouse `cce_analytics`. Columns are reconciled against the live `ccedb` schema. Two large unused JSONB columns (`intelligence_event_log.event_payload`, `intelligence_delivery.fhir_payload`) are excluded at the connector.
+Change Data Capture from committed PostgreSQL records (shared `ccedb`). **14 tables** captured from 3 services (Collector, Compliance, Intelligence) → ClickHouse `cce_analytics`. This includes `facility` (now owned by the compliance service and CDC'd, not a static list) and the two append-only transition logs `protocol_instance_history` / `step_instance_history`. Columns are reconciled against the live `ccedb` schema. Two large unused JSONB columns (`intelligence_event_log.event_payload`, `intelligence_delivery.fhir_payload`) are excluded at the connector.
 
 For the full table listing and the Kafka-ingestion design, see [Data Flow & Schema Design](docs/data-flow.md).
 
